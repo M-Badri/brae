@@ -107,6 +107,35 @@ void amulFK(int nC, const float* __restrict__ diag, const float* __restrict__ up
 // -> 5.7-5.8). Reverted. The cost is the per-kernel floor times 121 kernels per V-cycle, and the lever
 // that addresses that is fusing the coarse hierarchy into one kernel, the way device_dilu.cu walks its
 // levels in a single block.
+// FP-12: the SAME SpMV over a contiguous row. Each row holds the cell's owner faces in ownerStart order
+// followed by its neighbour faces in losort order, so the sum is the one amulFK computes, term for term
+// and in the same sequence -- identical bits. The point is the inner loop: one sequential read of
+// (val, col) where the face form takes two indirections (nei[f] or losort[k] then owner[f]) into arrays
+// that are not ordered for coalescing. Measured motive: on gasMixing/injectorPipe the face-form SpMV
+// costs 4.2 us on a level under 1,000 cells where an elementwise kernel on the same grid costs 0.76.
+static __global__
+void amulCsrFK(int nC, const float* __restrict__ diag, const label* __restrict__ row,
+               const label* __restrict__ col, const float* __restrict__ val,
+               const float* __restrict__ psi, float* __restrict__ Apsi)
+{
+    const int c = blockIdx.x*blockDim.x + threadIdx.x;
+    if (c >= nC) return;
+    float s = diag[c]*psi[c];
+    for (label i = row[c]; i < row[c+1]; ++i)
+        s += val[i]*psi[col[i]];
+    Apsi[c]=s;
+}
+// Refill a grid's CSR values from its FP64 face arrays. Replaces the two cast_ launches that grid's
+// upper and lower would otherwise need, so a CSR grid costs one launch per solve, not two.
+static __global__
+void csrGatherValsK(int nnz, const label* __restrict__ src, const scalar* __restrict__ upper,
+                    const scalar* __restrict__ lower, float* __restrict__ val)
+{
+    const int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i >= nnz) return;
+    const label s = src[i];
+    val[i] = (s >= 0) ? (float)upper[s] : (float)lower[-s - 1];
+}
 inline void amulF(const LduF& A, const float* x, float* y)
 {
     amulFK<<<nBlocks(A.nCells),TPB>>>(A.nCells, A.diag, A.upper, A.lower, A.nei, A.owner,

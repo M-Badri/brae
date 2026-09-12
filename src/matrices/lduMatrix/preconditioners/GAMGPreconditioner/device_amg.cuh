@@ -139,6 +139,16 @@ struct AMGData {
     std::vector<DeviceBuffer<float>> fDiag, fUpper, fLower;     // FP32 matrices per grid
     std::vector<DeviceBuffer<float>> vAxF, vRF, vXF, vBF;       // FP32 V-cycle work vectors per grid
     bool fp32Alloc = false;
+    // FP-12: the FP32 SpMV's operand, per grid, as ONE contiguous row instead of two indirections.
+    // csrRow[g] is nCells+1 offsets; csrCol[g] the column of each entry; csrVal[g] its FP32 value;
+    // csrSrc[g] says where that value comes from in the FP64 face arrays (f for upper[f], -(f+1) for
+    // lower[f]) so amgCastFP32 can refill the values in one pass per grid. The entries of a row are the
+    // cell's owner faces in ownerStart order and then its neighbour faces in losort order -- the exact
+    // sequence amulFK sums in, so the arithmetic and the bits are unchanged. Empty for grids that keep
+    // the face form (see amgCsrBelow).
+    std::vector<DeviceBuffer<label>> csrRow, csrCol, csrSrc;
+    std::vector<DeviceBuffer<float>> csrVal;
+    bool csrBuilt = false;
     std::unique_ptr<AMGGraphCache> gcache;                      // cached V-cycle graph (capture once, replay)
     std::unique_ptr<AMGGraphCache> gcacheF;                     // cached FP32 V-cycle graph (#7 mixed precision)
     std::unique_ptr<PCGGraphCache> pcgCache;                    // cached device-resident PCG WHILE-body graph (#6); per-solver lifetime

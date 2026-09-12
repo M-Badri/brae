@@ -13,6 +13,8 @@
 #include "device_blas.cuh"         // deviceCopy / deviceDot / deviceReciprocalV
 #include <cuda_runtime.h>
 #include <cstdio>
+#include <limits>
+#include <vector>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -248,6 +250,120 @@ void vcycleAt(
 // It reuses the templated zeroT/smoothT/residualT/restrictT/prolongT<float>; only the casts and the FP32 SpMV (amulF)
 // are FP32-specific.
 // (amulFK/amulF -- the FP32 SpMV -- now live in device_amg_internal.cuh, shared with the FP32 GS solver.)
+// ---- FP-12: the coarse operator as contiguous rows -------------------------------------------
+//
+// The FP32 SpMV reads its off-diagonals through two indirections -- upper[f] with psi[nei[f]] over the
+// cell's owner faces, then lower[f] with psi[owner[f]] over losort -- into arrays ordered by FACE, not
+// by cell. On the fine grid that is bandwidth-bound work and the order does not matter; on a coarse
+// grid it is a few hundred threads chasing scattered addresses with nothing to hide the latency, and it
+// shows: 4.2 us on a level under 1,000 cells where an elementwise kernel on the same grid takes 0.76,
+// and 2.5 of the pressure phase's 6.6 ms per iteration across the hierarchy (nsys on
+// gasMixing/injectorPipe, 74,650 cells, 11 levels, ~15 V-cycles per iteration).
+//
+// So each grid below a threshold gets its rows laid out contiguously: entry i of row c is a (value,
+// column) pair, the cell's owner faces in ownerStart order first and then its neighbour faces in losort
+// order -- the exact sequence amulFK sums in. Same terms, same order, same bits (amulCsrFK).
+//
+// The values are refilled once per solve from the FP64 face arrays (csrGatherValsK), which REPLACES the
+// two cast_ launches that grid's upper and lower would otherwise need, so the layout costs no extra
+// launch. The structure is built once per hierarchy: agglomeration is static for the life of the mesh.
+//
+// BRAE_AMG_CSR=0 restores the face form everywhere; BRAE_AMG_CSR_BELOW moves the threshold.
+namespace {
+
+int amgCsrOn()
+{
+    static const int on = []()
+    {
+        const char* e = std::getenv("BRAE_AMG_CSR");
+        return (e && std::atoi(e) == 0) ? 0 : 1;
+    }();
+    return on;
+}
+// EVERY grid by default, the fine one included. Swept on gasMixing/injectorPipe (74,650 cells), p solve
+// in ms per iteration: 4.3 with the face form everywhere, then 4.3 / 4.2 / 4.0 / 3.9 / 3.8 as the
+// threshold rises through 512 / 2,048 / 8,192 / 16,384 / every grid. The fine grid gains too -- its
+// owner half is already sequential in the face arrays but its neighbour half is read through losort,
+// and the row layout makes both contiguous.
+int amgCsrBelow()
+{
+    static const int n = []()
+    {
+        const char* e = std::getenv("BRAE_AMG_CSR_BELOW");
+        return (e && std::atoi(e) > 0) ? std::atoi(e) : std::numeric_limits<int>::max();
+    }();
+    return n;
+}
+
+// label arrays come back from wherever they live -- a DeviceBuffer for a coarse grid, a raw device
+// pointer for the fine one.
+std::vector<label> pullLabels(const label* d, int n)
+{
+    std::vector<label> h(n);
+    if (n > 0) cudaCheck(cudaMemcpy(h.data(), d, n*sizeof(label), cudaMemcpyDeviceToHost), "csr pull");
+    return h;
+}
+
+// One grid's rows, built on the host from its addressing. Returns false when the grid keeps the face
+// form (too large to gain, or nothing to lay out).
+bool buildCsrForGrid(AMGData& amg, int g, const LduF& A)
+{
+    if (A.nCells <= 0 || A.nInternalFaces <= 0) return false;
+    if (A.nCells > amgCsrBelow()) return false;
+
+    const std::vector<label> ownerStart = pullLabels(A.ownerStart, A.nCells + 1);
+    const std::vector<label> losortStart = pullLabels(A.losortStart, A.nCells + 1);
+    const std::vector<label> losort = pullLabels(A.losort, A.nInternalFaces);
+    const std::vector<label> nei = pullLabels(A.nei, A.nInternalFaces);
+    const std::vector<label> owner = pullLabels(A.owner, A.nInternalFaces);
+
+    std::vector<label> row(A.nCells + 1, 0), col, src;
+    col.reserve(2*A.nInternalFaces);
+    src.reserve(2*A.nInternalFaces);
+    for (int c = 0; c < A.nCells; ++c)
+    {
+        row[c] = static_cast<label>(col.size());
+        for (label f = ownerStart[c]; f < ownerStart[c+1]; ++f)      // upper[f] * psi[nei[f]]
+        {
+            col.push_back(nei[f]);
+            src.push_back(f);
+        }
+        for (label k = losortStart[c]; k < losortStart[c+1]; ++k)    // lower[f] * psi[owner[f]]
+        {
+            const label f = losort[k];
+            col.push_back(owner[f]);
+            src.push_back(-f - 1);
+        }
+    }
+    row[A.nCells] = static_cast<label>(col.size());
+
+    amg.csrRow[g].copyFrom(row);
+    amg.csrCol[g].copyFrom(col);
+    amg.csrSrc[g].copyFrom(src);
+    amg.csrVal[g].resize(col.size());
+    return true;
+}
+
+}   // namespace
+
+// Builds the CSR mirror for every grid that qualifies. Called once, from amgCastFP32, after the FP32
+// buffers exist; the agglomeration behind it is static for the life of the mesh.
+void amgBuildCsrFP32(AMGData& amg, const DeviceLduView& A)
+{
+    const int G = amg.nLevels();
+    amg.csrRow.resize(G+1);
+    amg.csrCol.resize(G+1);
+    amg.csrSrc.resize(G+1);
+    amg.csrVal.resize(G+1);
+    for (int g = 0; g <= G; ++g)
+    {
+        const DeviceLduView v = (g==0) ? A : amg.level[g-1].coarseView();
+        const LduF f = lduF(v, amg.fDiag[g], amg.fUpper[g], amg.fLower[g]);
+        buildCsrForGrid(amg, g, f);
+    }
+    amg.csrBuilt = true;
+}
+
 // Cast the (current) FP64 fine + coarse matrices to their FP32 mirrors. Allocates the mirrors + FP32 work vectors once.
 void amgCastFP32(
     AMGData& amg,
@@ -276,14 +392,26 @@ void amgCastFP32(
         }
         amg.fp32Alloc = true;
     }
+    if (amgCsrOn() && !amg.csrBuilt) amgBuildCsrFP32(amg, A);       // FP-12, once per hierarchy
     for (int g=0; g<=G; ++g)
     {
         const DeviceLduView v = (g==0) ? A : amg.level[g-1].coarseView();
         cast_<scalar,float><<<nBlocks(v.nCells),TPB>>>(v.nCells, v.diag, amg.fDiag[g].data());
         if (v.nInternalFaces>0)
         {
-            cast_<scalar,float><<<nBlocks(v.nInternalFaces),TPB>>>(v.nInternalFaces, v.upper, amg.fUpper[g].data());
-            cast_<scalar,float><<<nBlocks(v.nInternalFaces),TPB>>>(v.nInternalFaces, v.lower, amg.fLower[g].data());
+            // A CSR grid takes its off-diagonals through the row layout instead, in ONE launch where
+            // the face form needs two -- the same values, gathered into the order the SpMV reads them.
+            const int nnz = amgCsrOn() ? static_cast<int>(amg.csrVal[g].size()) : 0;
+            if (nnz > 0)
+            {
+                csrGatherValsK<<<nBlocks(nnz),TPB>>>(nnz, amg.csrSrc[g].data(), v.upper, v.lower,
+                                                     amg.csrVal[g].data());
+            }
+            else
+            {
+                cast_<scalar,float><<<nBlocks(v.nInternalFaces),TPB>>>(v.nInternalFaces, v.upper, amg.fUpper[g].data());
+                cast_<scalar,float><<<nBlocks(v.nInternalFaces),TPB>>>(v.nInternalFaces, v.lower, amg.fLower[g].data());
+            }
         }
     }
 }
@@ -306,6 +434,20 @@ void amgCastFP32(
 // the latency. One block makes that strictly worse. The lever that remains is the coarse operator's
 // LAYOUT -- a per-level CSR whose inner loop is one contiguous read instead of two indirections -- not
 // the launch structure.
+// The FP32 SpMV for grid g: the contiguous-row form where that grid has one, the face form otherwise.
+// Same sum, same order, same bits either way (see amgBuildCsrFP32).
+static inline void amgSpmvF(AMGData& amg, int g, const LduF& Ag, const float* x, float* y)
+{
+    if (!amg.csrVal.empty() && amg.csrVal[g].size() > 0)
+    {
+        amulCsrFK<<<nBlocks(Ag.nCells),TPB>>>(Ag.nCells, Ag.diag, amg.csrRow[g].data(),
+                                              amg.csrCol[g].data(), amg.csrVal[g].data(), x, y);
+        cudaCheck(cudaGetLastError(), "amulCsrF");
+        return;
+    }
+    amulF(Ag, x, y);
+}
+
 void vcycleAtF(
     int g,
     AMGData& amg,
@@ -342,10 +484,10 @@ void vcycleAtF(
     }
     for (int s=0; s<NPRE; ++s)
     {
-        amulF(Ag, xg, amg.vAxF[g].data());
+        amgSpmvF(amg, g, Ag, xg, amg.vAxF[g].data());
         smoothT<float><<<nBlocks(n),TPB>>>(n, bg, amg.vAxF[g].data(), Ag.diag, xg);
     }
-    amulF(Ag, xg, amg.vAxF[g].data());
+    amgSpmvF(amg, g, Ag, xg, amg.vAxF[g].data());
     residualT<float><<<nBlocks(n),TPB>>>(n, bg, amg.vAxF[g].data(), amg.vRF[g].data());
     const AMGLevel& Lg = amg.level[g];
     const int nc = Lg.nCoarse;
@@ -357,7 +499,7 @@ void vcycleAtF(
     prolongT<float><<<nBlocks(n),TPB>>>(n, Lg.map.data(), amg.vXF[g+1].data(), xg);
     for (int s=0; s<NPOST; ++s)
     {
-        amulF(Ag, xg, amg.vAxF[g].data());
+        amgSpmvF(amg, g, Ag, xg, amg.vAxF[g].data());
         smoothT<float><<<nBlocks(n),TPB>>>(n, bg, amg.vAxF[g].data(), Ag.diag, xg);
     }
 }

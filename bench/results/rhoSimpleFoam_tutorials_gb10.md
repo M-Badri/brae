@@ -603,3 +603,50 @@ built once per hierarchy, with the values regathered on each Galerkin update and
 concatenated owner-then-losort so the sum order is unchanged, would make the inner loop one contiguous
 read and stay bit-identical. The ceiling: the SpMV is 2.5 of the phase's 6.6 ms per iteration, and the
 elementwise kernels on the same grids run 5x faster.
+
+## FP-12: the coarse operator as contiguous rows (2026-09-13)
+
+The one candidate the last round's measurements left standing. The FP32 SpMV read its off-diagonals
+through two indirections -- `upper[f]` with `psi[nei[f]]` over the cell's owner faces, then `lower[f]`
+with `psi[owner[f]]` over losort -- into arrays ordered by FACE, not by cell. Each grid now carries its
+rows contiguously instead: entry i of row c is a (value, column) pair, the cell's owner faces in
+ownerStart order first and then its neighbour faces in losort order, which is the exact sequence the
+face-form kernel sums in. Same terms, same order, same bits.
+
+The values are refilled once per solve from the FP64 face arrays, and that REPLACES the two casts that
+grid's upper and lower needed, so the layout costs no extra launch. The structure is built once per
+hierarchy, on the host, because the agglomeration is static for the life of the mesh.
+`BRAE_AMG_CSR=0` restores the face form; `BRAE_AMG_CSR_BELOW` restricts it to grids under a size.
+
+| injectorPipe, 74,650 cells | face form | contiguous rows |
+|----------------------------|----------:|----------------:|
+| SpMV, launches per iteration |     451.5 |           451.5 |
+| SpMV, ms per iteration       |     2.602 |           1.634 |
+| casts, launches per iteration |     93.2 |            71.2 |
+| whole iteration, launches     |     2,425 |           2,414 |
+| whole iteration, GPU ms       |     13.79 |           12.77 |
+
+The matrix-vector kernel is 37% faster for the same 451 launches, and the iteration loses a full
+millisecond of GPU time. Three runs of 100 iterations on four cases, pressure solve in ms per
+iteration:
+
+| case          | face form | contiguous rows |
+|---------------|----------:|----------------:|
+| injectorPipe  | 4.3 / 4.3 / 4.3 | 3.9 / 4.0 / 3.8 |
+| aerofoil      | 2.9 / 2.9 / 2.9 | 2.5 / 2.5 / 2.5 |
+| squareBendLiq | 5.2 / 5.2 / 5.1 | 4.8 / 4.8 / 4.8 |
+| squareBend    | 5.8 / 5.7 / 5.7 | 5.8 / 5.7 / 5.7 |
+
+squareBend is flat because it is the transonic case: its pressure matrix is asymmetric and the solve is
+BiCGStab with the V-cycle as a preconditioner, where the cycle is a smaller share of the solve. The
+other three gain 8 to 14 percent of the pressure solve.
+
+EVERY GRID, INCLUDING THE FINEST. Swept on injectorPipe, pressure solve in ms per iteration: 4.3 with
+the face form, then 4.3, 4.2, 4.0, 3.9, 3.8 as the threshold rises through 512, 2,048, 8,192, 16,384
+and every grid. The fine grid gains too: its owner half is already sequential in the face arrays, but
+its neighbour half is read through losort, and the row layout makes both contiguous. That is why the
+default is every grid rather than the coarse ones this row started with.
+
+BIT-IDENTITY: every residual line over 100 iterations matches the face form on injectorPipe,
+squareBend, aerofoilNACA0012 and squareBendLiq. 34 gates covering the AMG, the PCG and BiCGStab
+drivers, the transonic path, determinism, run-to-run identity and the tutorials pass at their bounds.

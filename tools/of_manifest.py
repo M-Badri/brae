@@ -705,10 +705,26 @@ COMPONENTS = {
                   "device-side duration of a scattered indirect gather -- 4.2 us for the SpMV under "
                   "1,000 cells where zeroT on the same grid is 0.76 -- and one multiprocessor makes "
                   "that worse. Reverted; the finding is in device_amg_vcycle.cu. The candidate the "
-                  "measurements still support is the coarse operator's LAYOUT: a per-level CSR with the "
-                  "columns concatenated owner-then-losort (so the sum order, and the bits, are "
-                  "unchanged) and the values regathered on each Galerkin update, turning two "
-                  "indirections into one contiguous read."),
+                  "measurements still support is the coarse operator's LAYOUT, AND THAT ONE WORKS "
+                  "(2026-09-13). Every grid now carries its rows contiguously -- entry i of row c is a "
+                  "(value, column) pair, the cell's owner faces in ownerStart order then its neighbour "
+                  "faces in losort order, which is the exact sequence the face-form kernel sums in, so "
+                  "the terms, their order and the bits are unchanged (amulCsrFK against amulFK). The "
+                  "values are refilled once per solve from the FP64 face arrays, replacing the two "
+                  "casts that grid's upper and lower needed, so the layout costs no launch; the "
+                  "structure is built once per hierarchy because the agglomeration is static for the "
+                  "life of the mesh. MEASURED on gasMixing/injectorPipe: the SpMV goes 2.602 -> 1.634 "
+                  "ms per iteration for the same 451 launches (-37%) and the whole iteration 13.79 -> "
+                  "12.77 GPU ms. Pressure solve over three runs of 100 iterations: injectorPipe 4.3 -> "
+                  "3.9, aerofoilNACA0012 2.9 -> 2.5, squareBendLiq 5.2 -> 4.8 ms/it; squareBend is flat "
+                  "because it is transonic, where the asymmetric matrix puts the V-cycle inside "
+                  "BiCGStab and the cycle is a smaller share of the solve. The threshold was swept and "
+                  "EVERY grid wins, the finest included (4.3 / 4.3 / 4.2 / 4.0 / 3.9 / 3.8 ms for the "
+                  "face form and thresholds 512 / 2,048 / 8,192 / 16,384 / all): the fine grid's owner "
+                  "half is already sequential in the face arrays but its neighbour half is read through "
+                  "losort. Bit-identical over 100 iterations on injectorPipe, squareBend, "
+                  "aerofoilNACA0012 and squareBendLiq; BRAE_AMG_CSR=0 restores the face form and "
+                  "BRAE_AMG_CSR_BELOW restricts it by grid size."),
 
         dict(name="dispatch", of_symbol="controlDict application",
              of_file="applications/solvers/incompressible/simpleFoam/simpleFoam.C",
