@@ -694,9 +694,21 @@ COMPONENTS = {
                   "atomics, so it is not run-to-run deterministic, and squareBend diverges under it). "
                   "The FP32 V-cycle that is already the default is worth 0.8 ms/it. What the row points "
                   "at next, with the prize measured: fuse the coarse hierarchy into ONE kernel the way "
-                  "device_dilu.cu walks its levels in a single block -- the levels at or below 4,096 "
-                  "cells are about 2.3 of the phase's 6.6 ms per iteration in some 80 launches per "
-                  "cycle."),
+                  "device_dilu.cu walks its levels in a single block. THAT WAS WRITTEN AND IT LOSES "
+                  "(2026-09-13): one block walking every level below a threshold -- down, the coarsest "
+                  "LU solve, and back up -- is exactly bit-identical (100 iterations of injectorPipe, "
+                  "every residual line) and slower at every threshold, 6.7/6.7/6.9/6.9/7.1/7.0 ms per "
+                  "iteration for 64/128/256/512/1024/2048 cells against 6.5 unfused. The reason "
+                  "corrects the earlier reading: these kernels are ALREADY graph nodes, so node "
+                  "boundaries are cheap (fusing below 64 cells removes a dozen of them on levels where "
+                  "one block is ample parallelism and gains nothing). What the coarse levels pay is the "
+                  "device-side duration of a scattered indirect gather -- 4.2 us for the SpMV under "
+                  "1,000 cells where zeroT on the same grid is 0.76 -- and one multiprocessor makes "
+                  "that worse. Reverted; the finding is in device_amg_vcycle.cu. The candidate the "
+                  "measurements still support is the coarse operator's LAYOUT: a per-level CSR with the "
+                  "columns concatenated owner-then-losort (so the sum order, and the bits, are "
+                  "unchanged) and the values regathered on each Galerkin update, turning two "
+                  "indirections into one contiguous read."),
 
         dict(name="dispatch", of_symbol="controlDict application",
              of_file="applications/solvers/incompressible/simpleFoam/simpleFoam.C",

@@ -558,3 +558,48 @@ way `device_dilu.cu` walks its levels in a single block. The levels at or below 
 1.24 ms of SpMV, roughly 0.5 ms of smoother, restriction, prolongation, residual and zeroing, and the
 0.55 ms coarse LU solve -- about 2.3 of the phase's 6.6 ms per iteration, in kernels that would become
 one launch per cycle instead of about 80.
+
+## FP-12, the coarse-hierarchy fusion: written, bit-identical, and slower (2026-09-13)
+
+The lever the last round pointed at was the one that worked for the DILU level walk: from the first
+level small enough for a single block, run the whole rest of the V-cycle -- down, the coarsest LU
+solve, and back up -- in ONE kernel, with `__syncthreads` where the launch boundaries were. It was
+written, with every statement copied from the kernel it replaces (the FP32 SpMV, the weighted-Jacobi
+smoother, the residual, the restriction gather, the injection prolongation, the zeroing and the
+one-block LU substitution), so a grid-stride loop in one block computes each cell exactly as one thread
+of a many-block launch did.
+
+IT IS EXACTLY BIT-IDENTICAL: every residual line over 100 iterations of gasMixing/injectorPipe matches
+the separate-launch path, which is the arithmetic claim the design makes. It is also slower at every
+threshold:
+
+| fuse levels below (cells) | pEqn ms/it | p solve ms/it |
+|---------------------------|-----------:|--------------:|
+| 64                        |        6.7 |           4.3 |
+| 128                       |        6.7 |           4.3 |
+| 256                       |        6.9 |           4.2 |
+| 512                       |        6.9 |           4.3 |
+| 1024                      |        7.1 |           4.7 |
+| 2048                      |        7.0 |           4.8 |
+| separate launches         |        6.5 |           4.2 |
+
+WHY, and this is what the row gains. These kernels are ALREADY graph nodes, so node-to-node overhead is
+not what the V-cycle pays. Fusing only below 64 cells removes a dozen node boundaries on levels where
+one block of 256 threads is ample parallelism, and it still gained nothing, so the boundaries are
+cheap. What the coarse levels actually pay is the device-side duration of a scattered indirect gather:
+the FP32 SpMV takes 4.2 us on a level under 1,000 cells where the elementwise zeroT on the same grid
+takes 0.76, because the owner/losort indirection with a few hundred threads has no parallelism to hide
+its latency. Putting that on ONE multiprocessor makes it strictly worse.
+
+So the premise behind this lever -- that the V-cycle is launch-bound -- is wrong for this code, and the
+earlier reading of "121 kernels per cycle, 95% overhead" needs correcting: the overhead is real but it
+is INSIDE each kernel, not between them. The reverted kernel's note sits in device_amg_vcycle.cu so the
+next person does not rediscover it.
+
+WHAT IS LEFT ON THIS ROW, and it is now the only candidate the measurements support: the coarse
+operator's LAYOUT. The SpMV's inner loop is two indirections (`nei[f]` then `psi[...]`, and `losort[k]`
+then `owner[f]` then `psi[...]`) over a face list that is not ordered for coalescing. A per-level CSR
+built once per hierarchy, with the values regathered on each Galerkin update and the columns
+concatenated owner-then-losort so the sum order is unchanged, would make the inner loop one contiguous
+read and stay bit-identical. The ceiling: the SpMV is 2.5 of the phase's 6.6 ms per iteration, and the
+elementwise kernels on the same grids run 5x faster.
