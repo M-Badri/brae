@@ -1560,3 +1560,177 @@ void deviceLMAddReaction(const DeviceMesh& dm, const DeviceBuffer<scalar>& sp, c
 }
 
 } // namespace brae
+
+namespace brae {
+
+// ---- FP-2 fusions (bench/rhoSimpleFoam/FASTPATH.md, 2026-09-12) --------------------------------------
+// The closure launched one kernel per elementwise step; on the 16k-cell aerofoil that was ~130 launches
+// of physics per iteration behind ~4 us of gap each. These fuse the chains that share a loop. Every
+// expression below is TEXT-IDENTICAL to the kernel it replaces (s2Kernel, gByNuKernel, hadamardKernel,
+// cdKernel, f1Kernel, f2Kernel, blendKernel, gbyNuLimitKernel, dEffKernel, axpyKernel), so nvcc contracts
+// the same multiply-adds; where a chain crossed a kernel boundary (a stored product read back by the
+// next kernel) the intermediate is pinned with __dmul_rn so no new contraction can form. Bit-identical
+// on the SST stage dumps, the residual lines and the written fields (5 iterations, aerofoilNACA0012),
+// which is what lets the old kernels stay as the reference the fused ones are held against.
+
+// s2Kernel + gByNuKernel + hadamard(G = nut*GbyNu0), one read of the tensor.
+__global__
+void sstProductionKernel(int nC, const scalar* __restrict__ gradU, const scalar* __restrict__ nut,
+                         scalar* __restrict__ S2, scalar* __restrict__ GbyNu0, scalar* __restrict__ G)
+{
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= nC) return;
+    scalar t[9];
+    for (int q = 0; q < 9; ++q)
+        t[q] = gradU[q * nC + c];
+    {
+        scalar s = 0.0;   // magSqr(symm(gradU)) = sum_ab symm_ab^2
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+            {
+                const scalar sab = 0.5 * (t[a*3+b] + t[b*3+a]);
+                s += sab * sab;
+            }
+        S2[c] = 2.0 * s;
+    }
+    const scalar t23 = (2.0 / 3.0) * (t[0] + t[4] + t[8]);
+    scalar gg = 0.0;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+        {
+            const scalar dts = t[i*3+j] + t[j*3+i] - ((i == j) ? t23 : 0.0);   // devTwoSymm
+            gg += t[i*3+j] * dts;                                              // doubleDot
+        }
+    GbyNu0[c] = gg;
+    G[c] = __dmul_rn(nut[c], gg);   // hadamardKernel: out = a*b, a lone product
+}
+
+// cdKernel + f1Kernel + f2Kernel: F1 reads the CD this thread just formed.
+__global__
+void sstCdF1F2Kernel(
+    int nC,
+    const scalar* __restrict__ gKx, const scalar* __restrict__ gKy, const scalar* __restrict__ gKz,
+    const scalar* __restrict__ gOx, const scalar* __restrict__ gOy, const scalar* __restrict__ gOz,
+    const scalar* __restrict__ k, const scalar* __restrict__ om, const scalar* __restrict__ y,
+    scalar twoA2, scalar nu, scalar betaStar, scalar alphaOmega2, int lm,
+    const scalar* __restrict__ nuCell,
+    scalar* __restrict__ CD, scalar* __restrict__ F1, scalar* __restrict__ F2)
+{
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= nC) return;
+    const scalar dot = gKx[c]*gOx[c] + gKy[c]*gOy[c] + gKz[c]*gOz[c];   // grad k . grad omega
+    const scalar cdv = twoA2 * dot / om[c];
+    CD[c] = cdv;
+    const scalar nuc = nuCell ? nuCell[c] : nu;
+    const scalar kk = k[c], w = om[c], yy = y[c];
+    {
+        const scalar CDplus = fmax(cdv, (scalar)1.0e-10);
+        const scalar a  = (1.0 / betaStar) * sqrt(kk) / (w * yy);
+        const scalar b  = 500.0 * nuc / (yy * yy * w);
+        const scalar cc = (4.0 * alphaOmega2) * kk / (CDplus * yy * yy);
+        const scalar arg1 = fmin(fmin(fmax(a, b), cc), (scalar)10.0);
+        const scalar a2 = arg1 * arg1;   // pow4(arg1) = (arg1^2)^2
+        scalar f1 = tanh(a2 * a2);
+        if (lm)
+        {
+            const scalar Ry = yy * sqrt(kk) / nuc;
+            const scalar r = Ry / 120.0;
+            const scalar r2 = r * r, r4 = r2 * r2;
+            f1 = fmax(f1, exp(-(r4 * r4)));
+        }
+        F1[c] = f1;
+    }
+    {
+        const scalar a = (2.0 / betaStar) * sqrt(kk) / (w * yy);
+        const scalar b = 500.0 * nuc / (yy * yy * w);
+        const scalar arg2 = fmin(fmax(a, b), (scalar)100.0);
+        F2[c] = tanh(arg2 * arg2);   // sqr(arg2)
+    }
+}
+
+// blendKernel (gamma) + blendKernel (beta) + gbyNuLimitKernel.
+__global__
+void sstBlendLimitKernel(
+    int nC,
+    const scalar* __restrict__ F1, const scalar* __restrict__ F2, const scalar* __restrict__ S2,
+    const scalar* __restrict__ GbyNu0, const scalar* __restrict__ om,
+    scalar gamma1, scalar gamma2, scalar beta1, scalar beta2,
+    scalar a1, scalar b1, scalar c1, scalar betaStar,
+    scalar* __restrict__ gamma, scalar* __restrict__ beta, scalar* __restrict__ GbyNu)
+{
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= nC) return;
+    gamma[c] = F1[c] * (gamma1 - gamma2) + gamma2;
+    beta[c]  = F1[c] * (beta1 - beta2) + beta2;
+    const scalar denom = fmax(a1 * om[c], b1 * F2[c] * sqrt(S2[c]));
+    GbyNu[c] = fmin(GbyNu0[c], (c1 / a1) * betaStar * om[c] * denom);
+}
+
+// dEffKernel(nu = 0) + hadamard(D *= rho) + hadamard(mu = nu*rho) + axpy(1.0, mu, D): the compressible
+// effective diffusivity, cells or boundary faces.
+__global__
+void dEffRhoKernel(
+    int n,
+    const scalar* __restrict__ F1, const scalar* __restrict__ nut,
+    scalar alpha1, scalar alpha2, scalar nu,
+    const scalar* __restrict__ rho, const scalar* __restrict__ nuField,
+    scalar* __restrict__ D)
+{
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= n) return;
+    scalar d = (F1[c] * (alpha1 - alpha2) + alpha2) * nut[c] + nu;   // dEffKernel, nu = 0 at run time
+    d = __dmul_rn(d, rho[c]);                                        // hadamardKernel: D = D*rho
+    const scalar mu = __dmul_rn(nuField[c], rho[c]);                 // hadamardKernel: mu = nu*rho
+    d += scalar(1.0) * mu;                                           // axpyKernel: y += a*x, a = 1
+    D[c] = d;
+}
+
+void deviceSstProduction(const DeviceBuffer<scalar>& gradU, const DeviceBuffer<scalar>& nut, int nC,
+                         DeviceBuffer<scalar>& S2, DeviceBuffer<scalar>& GbyNu0, DeviceBuffer<scalar>& G)
+{
+    S2.resize(nC); GbyNu0.resize(nC); G.resize(nC);
+    sstProductionKernel<<<nBlocks(nC), TPB>>>(nC, gradU.data(), nut.data(), S2.data(), GbyNu0.data(), G.data());
+    cudaCheck(cudaGetLastError(), "sstProduction");
+}
+
+void deviceSstCdF1F2(
+    const DeviceBuffer<scalar>& gKx, const DeviceBuffer<scalar>& gKy, const DeviceBuffer<scalar>& gKz,
+    const DeviceBuffer<scalar>& gOx, const DeviceBuffer<scalar>& gOy, const DeviceBuffer<scalar>& gOz,
+    const DeviceBuffer<scalar>& k, const DeviceBuffer<scalar>& omega, const DeviceBuffer<scalar>& y,
+    scalar nu, const KOmegaSSTCoeffs& co, bool lm, const DeviceBuffer<scalar>* nuCell,
+    DeviceBuffer<scalar>& CD, DeviceBuffer<scalar>& F1, DeviceBuffer<scalar>& F2)
+{
+    const int nC = static_cast<int>(omega.size());
+    CD.resize(nC); F1.resize(nC); F2.resize(nC);
+    sstCdF1F2Kernel<<<nBlocks(nC), TPB>>>(nC, gKx.data(), gKy.data(), gKz.data(), gOx.data(), gOy.data(), gOz.data(),
+                                          k.data(), omega.data(), y.data(), 2.0 * co.alphaOmega2, nu, co.betaStar,
+                                          co.alphaOmega2, lm ? 1 : 0, nuCell ? nuCell->data() : nullptr,
+                                          CD.data(), F1.data(), F2.data());
+    cudaCheck(cudaGetLastError(), "sstCdF1F2");
+}
+
+void deviceSstBlendLimit(
+    const DeviceBuffer<scalar>& F1, const DeviceBuffer<scalar>& F2, const DeviceBuffer<scalar>& S2,
+    const DeviceBuffer<scalar>& GbyNu0, const DeviceBuffer<scalar>& omega, const KOmegaSSTCoeffs& co,
+    DeviceBuffer<scalar>& gamma, DeviceBuffer<scalar>& beta, DeviceBuffer<scalar>& GbyNu)
+{
+    const int nC = static_cast<int>(omega.size());
+    gamma.resize(nC); beta.resize(nC); GbyNu.resize(nC);
+    sstBlendLimitKernel<<<nBlocks(nC), TPB>>>(nC, F1.data(), F2.data(), S2.data(), GbyNu0.data(), omega.data(),
+                                              co.gamma1, co.gamma2, co.beta1, co.beta2, co.a1, co.b1, co.c1, co.betaStar,
+                                              gamma.data(), beta.data(), GbyNu.data());
+    cudaCheck(cudaGetLastError(), "sstBlendLimit");
+}
+
+void deviceDEffRho(
+    const DeviceBuffer<scalar>& F1, const DeviceBuffer<scalar>& nut, scalar alpha1, scalar alpha2,
+    const DeviceBuffer<scalar>& rho, const DeviceBuffer<scalar>& nuField, DeviceBuffer<scalar>& D)
+{
+    const int n = static_cast<int>(F1.size());
+    D.resize(n);
+    dEffRhoKernel<<<nBlocks(n), TPB>>>(n, F1.data(), nut.data(), alpha1, alpha2, scalar(0),
+                                       rho.data(), nuField.data(), D.data());
+    cudaCheck(cudaGetLastError(), "dEffRho");
+}
+
+}   // namespace brae

@@ -244,3 +244,42 @@ Whole run 1.9 -> 1.5 s at 100 iterations and 3.2 -> 2.4 at 200, so 9 ms per iter
 OpenFOAM's 8 on 20 cores (0.89x, from 0.62x) and 1.13x on the 100-iteration wall (from 0.89x). The
 closure's own launches are the next step on this row, worth about 1 ms per iteration here.
 
+## FP-2, second step: the closure's own launches, fused where the chains share a loop (2026-09-12)
+
+With the DILU walk single-block, the aerofoil's turbulence phase profiled at 230 launches per
+iteration, 2.26 ms of GPU time and 3.26 ms of wall: the three DILU applies and the two factorisations
+about 1.7 ms of the GPU time, the SST physics about 0.5 ms behind roughly 1 ms of launch gaps. Four
+chains were fused, each kernel keeping the exact expression text of the kernels it replaces so nvcc
+contracts the same multiply-adds, with `__dmul_rn` pinning the products that used to cross a kernel
+boundary: S2 + production + G (3 launches to 1), CDkOmega + F1 + F2 (3 to 1), the gamma/beta blends +
+the GbyNu limit (3 to 1), and the compressible effective diffusivity DEff*rho + nu*rho on cells and on
+boundary faces (4 to 1, three sites). In the shared transport assembly the five `axpy(-1, l, M)`
+laplacian subtractions became one launch, which the kEpsilon closure takes as well.
+
+Bit-identity, the old kernels against the fused ones on the same binary line: aerofoilNACA0012 and
+squareBend, 5 iterations, every written field byte-identical (U, p, T, k, omega/epsilon, nut) and every
+residual line identical; all 18 SST stage dumps (`BRAE_SST_DUMP_DIR`: G, CD, F1, F23, GbyNuLim, S2,
+gradU, ...) byte-identical. injectorPipe's residual lines are identical and its written fields are
+not, but that case writes different low bits between two runs of ONE binary as well (the D-1 drift
+noted with squareBendLiq), so it cannot serve as a bit-identity witness.
+
+| aerofoil, turbulence phase | before | after |
+|----------------------------|-------:|------:|
+| launches per iteration     |    230 |   205 |
+| GPU ms/it (profiled)       |   2.26 |  2.25 |
+| wall ms/it (profiled)      |   3.26 |  3.10 |
+| wall ms/it, 3 plain runs   | 3.2 / 3.4 / 3.4 | 3.1 / 3.2 / 3.4 |
+| four phases, 3 plain runs  | 10.6 / 10.0 / 10.3 | 9.9 / 10.1 / 10.4 |
+
+Inside the run-to-run noise, as the profile predicted: 25 launches at ~4 us is 0.1 ms. The honest
+reading of FP-2 after both steps is that the kOmegaSST closure's kernels are not where its time goes.
+On this case the turbulence phase is the two DILU-preconditioned BiCGStab solves the fvSolution names
+(sequential by construction, 1.7 ms of the 2.25), and the iteration as a whole is the pressure phase's
+1783 launches of the AMG V-cycle on a 16,000-cell mesh (FP-10 / FP-12). The row's target of 2x kEpsilon
+per cell (76 ns) is not met at 194 ns and cannot be met without a decision about the preconditioner on
+`PBiCGStab`+`DILU` entries -- the Neumann series that already serves the GAMG entries, announced, with
+an opt-out -- which is a policy change and is left as the row's open question. Gates on the fused
+kernels: rho_komegasst_vs_openfoam, rho_sst_device_vs_openfoam, rho_step_cuda_turbulent,
+rho_step_cuda_euler, rho_kepsilon_cuda, turb_limitedlinear_vs_openfoam, rho_turb_limitedlinear_vs_openfoam,
+rho_gasmixing_vs_openfoam, rho_naca_restart_vs_openfoam, rho_tutorials_vs_openfoam -- all at their bounds.
+

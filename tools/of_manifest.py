@@ -1465,7 +1465,7 @@ COMPONENTS = {
                   "epsilon never having updateCoeffs called (so every flux-conditional patch contributed "
                   "nothing), the turbulent inlets being frozen at the case file's `value` instead of "
                   "recomputed from U and k, and the diffusion terms being assembled orthogonally while "
-                  "the case asked for `corrected`. See PORT.md."),
+                  "the case asked for `corrected`. See PORT.md. FP-2 FUSIONS (2026-09-12): the shared conv-diff assembly (turbulence_transport.cu) subtracts the five laplacian coefficient arrays in one launch, and the device kOmegaSST closure fuses S2+production+G, CD+F1+F2, the gamma/beta blends with the GbyNu limit, and the compressible DEff*rho+nu*rho chain (device_komega_sst.cu, FP-2 block), each kernel text-identical in its expressions to the ones it replaces and __dmul_rn pinning the products that used to cross a kernel boundary -- byte-identical fields and residual lines on aerofoilNACA0012 and squareBend over 5 iterations and on all 18 SST stage dumps. Worth 25 launches per iteration on the aerofoil, inside the run-to-run noise; the closure's cost there is the DILU-preconditioned k/omega solves the case names, not its kernels."),
         dict(name="createFieldRefs", of_symbol="createFieldRefs.H",
              of_file="applications/solvers/compressible/rhoSimpleFoam/createFieldRefs.H",
              classification="HOST_ONLY", status="REIMPLEMENT",

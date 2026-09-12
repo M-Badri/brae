@@ -1,4 +1,5 @@
 #include "turbulence_transport.cuh"
+#include <algorithm>   // std::max
 #include "device_mesh.cuh"     // deviceDivUpwindCoeffs / deviceDivLimitedCoeffs / deviceLaplacian*
 #include "device_kepsilon.cuh" // deviceGaussGrad, deviceCellLimitGrad, deviceBCValue
 #include "device_blas.cuh"     // deviceAxpy
@@ -15,6 +16,38 @@ namespace gpu {
 namespace turbulence {
 
 namespace {
+
+// FP-2: M -= the laplacian coefficients, five arrays of three lengths in one launch. Each statement is
+// axpyKernel's `y += a * x` with a = -1, so nvcc emits the same fused multiply-add and the bits match the
+// five separate launches this replaces (held by the SST dumps and written fields on aerofoilNACA0012 and
+// the residual lines on squareBend and injectorPipe, all bit-identical before and after).
+__global__ void subtractLaplacianKernel(
+    int nC, int nF, int nB,
+    const scalar* __restrict__ lDiag, const scalar* __restrict__ lUp, const scalar* __restrict__ lLo,
+    const scalar* __restrict__ lIC, const scalar* __restrict__ lBC,
+    scalar* __restrict__ diag, scalar* __restrict__ upper, scalar* __restrict__ lower,
+    scalar* __restrict__ iC, scalar* __restrict__ bC)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const scalar a = scalar(-1.0);
+    if (i < nC) diag[i] += a * lDiag[i];
+    if (i < nF) { upper[i] += a * lUp[i]; lower[i] += a * lLo[i]; }
+    if (i < nB) { iC[i] += a * lIC[i]; bC[i] += a * lBC[i]; }
+}
+
+void subtractLaplacian(
+    const DeviceBuffer<scalar>& lDiag, const DeviceBuffer<scalar>& lUp, const DeviceBuffer<scalar>& lLo,
+    const DeviceBuffer<scalar>& lIC, const DeviceBuffer<scalar>& lBC, PressureMatrix& M)
+{
+    const int nC = static_cast<int>(lDiag.size()), nF = static_cast<int>(lUp.size()), nB = static_cast<int>(lIC.size());
+    const int n = std::max(nC, std::max(nF, nB));
+    if (n <= 0) return;
+    constexpr int tpb = 256;
+    subtractLaplacianKernel<<<(n + tpb - 1) / tpb, tpb>>>(
+        nC, nF, nB, lDiag.data(), lUp.data(), lLo.data(), lIC.data(), lBC.data(),
+        M.diag.data(), M.upper.data(), M.lower.data(), M.iC.data(), M.bC.data());
+    cudaCheck(cudaGetLastError(), "subtractLaplacian");
+}
 // Each device module in the tree carries its own copy of this two-liner (rhoEEqn.cu, rhoPEqn.cu,
 // rhoPcEqn.cu, kEpsilon.cu). Kept local here for the same reason rather than adding a public symbol
 // for a memset.
@@ -86,11 +119,9 @@ void assembleScalarTransport(
         DeviceBuffer<scalar> lDiag, lUp, lLo, lIC, lBC;
         deviceLaplacianCoeffs(dm, gammaFace, lDiag, lUp, lLo, sc.correctedLaplacian);
         deviceBCLaplacianCoeffsFace(db, gammaBnd, lIC, lBC);
-        deviceAxpy(-1.0, lDiag, M.diag);
-        deviceAxpy(-1.0, lUp, M.upper);
-        deviceAxpy(-1.0, lLo, M.lower);
-        deviceAxpy(-1.0, lIC, M.iC);
-        deviceAxpy(-1.0, lBC, M.bC);
+        // FP-2: the five `axpy(-1, l, M)` subtractions in one launch (subtractLaplacianKernel above),
+        // the same `y += a*x` statement per array, so the same doubles.
+        subtractLaplacian(lDiag, lUp, lLo, lIC, lBC, M);
 
         if (sc.correctedLaplacian)
         {

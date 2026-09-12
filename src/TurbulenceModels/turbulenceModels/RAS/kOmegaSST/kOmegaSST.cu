@@ -414,10 +414,9 @@ void correct(
     else                    deviceGradU(dm, dbU, *in.Ux, *in.Uy, *in.Uz, gradU);
     if (in.gradULimitK > scalar(0))
         deviceCellLimitGradU(dm, dbU, *in.Ux, *in.Uy, *in.Uz, gradU, in.gradULimitK);
-    deviceS2(gradU, nC, S2);
-    deviceGByNuFromGradU(gradU, nC, GbyNu0);
-    G.resize(nC);
-    deviceHadamard(G, nut, GbyNu0);
+    // FP-2: s2 + gByNu + G = nut*GbyNu0 in one read of the tensor (deviceSstProduction, bit-identical
+    // to the three kernels it replaces).
+    deviceSstProduction(gradU, nut, nC, S2, GbyNu0, G);
     if (sd.on)
     {
         // The device holds gradU COMPONENT-major (all xx, then all xy, ...); the host holds one tensor
@@ -501,11 +500,11 @@ void correct(
     else                    deviceGaussGrad(dm, omega, obv, ogx, ogy, ogz);
     if (in.co.gradKLimitK > scalar(0))
         deviceCellLimitGrad(dm, omega, obv, ogx, ogy, ogz, in.co.gradKLimitK);
-    deviceCDkOmega(kgx, kgy, kgz, ogx, ogy, ogz, omega, in.co.alphaOmega2, CD);
     // F1/F2 blend on the KINEMATIC laminar viscosity, per cell -- the compressible lineage has no
-    // case-constant nu, and arg1/arg2 are written in nu, not mu.
-    deviceF1(k, omega, *in.yCell, CD, scalar(0), in.co, F1, /*lm=*/false, in.nuCell);
-    deviceF2(k, omega, *in.yCell, scalar(0), in.co, F2, in.nuCell);
+    // case-constant nu, and arg1/arg2 are written in nu, not mu. FP-2: CDkOmega, F1 and F2 in one launch
+    // (deviceSstCdF1F2; F1 reads the CD its own thread formed; bit-identical to the three kernels).
+    deviceSstCdF1F2(kgx, kgy, kgz, ogx, ogy, ogz, k, omega, *in.yCell, scalar(0), in.co, /*lm=*/false,
+                    in.nuCell, CD, F1, F2);
     if (sd.on)
     {
         sd.scalars("G", G.host());
@@ -518,9 +517,8 @@ void correct(
     // kOmegaSSTBase.C reassigns GbyNu0 = GbyNu(GbyNu0, F23, S2) AFTER G was taken from the raw value.
     // Using one for both is the easy mistake here; they are different quantities.
     DeviceBuffer<scalar> gamma, beta, GbyNu0lim;
-    deviceBlend(F1, in.co.gamma1, in.co.gamma2, gamma);
-    deviceBlend(F1, in.co.beta1,  in.co.beta2,  beta);
-    deviceGbyNuLimit(GbyNu0, omega, F2, S2, in.co, GbyNu0lim);
+    // FP-2: gamma, beta and the limited GbyNu in one launch.
+    deviceSstBlendLimit(F1, F2, S2, GbyNu0, omega, in.co, gamma, beta, GbyNu0lim);
     if (sd.on) sd.scalars("GbyNuLim", GbyNu0lim.host());
 
     // The boundary diffusivities take F1 EVALUATED ON the patch faces -- see f1BoundaryKernel. Not
@@ -539,18 +537,19 @@ void correct(
             in.yCell->data(), in.nuBndFace->data(),
             in.co.betaStar, in.co.alphaOmega2, F1b.data());
         cudaCheck(cudaGetLastError(), "kOmegaSST F1 boundary");
-        deviceDEff(F1b, *in.nutBndFace, in.co.alphaOmega1, in.co.alphaOmega2, scalar(0), DomB);
-        deviceDEff(F1b, *in.nutBndFace, in.co.alphaK1,     in.co.alphaK2,     scalar(0), DkB);
         // rho*D + mu on the boundary, the dynamic form the laplacian's patch coefficient wants. mu_b is
-        // formed here from nu_b*rho_b rather than carried as its own buffer: both are already required
+        // formed from nu_b*rho_b rather than carried as its own buffer: both are already required
         // inputs, and a third field that must agree with them is a third field that can disagree.
+        // FP-2: the whole chain (DEff, *rho, + nu*rho) is one launch per field (deviceDEffRho).
         if (in.rhoBndFace)
         {
-            DeviceBuffer<scalar> muB;
-            muB.resize(static_cast<std::size_t>(nB));
-            deviceHadamard(muB, *in.nuBndFace, *in.rhoBndFace);
-            deviceHadamard(DomB, DomB, *in.rhoBndFace); deviceAxpy(1.0, muB, DomB);
-            deviceHadamard(DkB,  DkB,  *in.rhoBndFace); deviceAxpy(1.0, muB, DkB);
+            deviceDEffRho(F1b, *in.nutBndFace, in.co.alphaOmega1, in.co.alphaOmega2, *in.rhoBndFace, *in.nuBndFace, DomB);
+            deviceDEffRho(F1b, *in.nutBndFace, in.co.alphaK1,     in.co.alphaK2,     *in.rhoBndFace, *in.nuBndFace, DkB);
+        }
+        else
+        {
+            deviceDEff(F1b, *in.nutBndFace, in.co.alphaOmega1, in.co.alphaOmega2, scalar(0), DomB);
+            deviceDEff(F1b, *in.nutBndFace, in.co.alphaK1,     in.co.alphaK2,     scalar(0), DkB);
         }
     }
 
@@ -586,14 +585,10 @@ void correct(
     // OpenFOAM's; reversing it is a different algorithm that still converges to something plausible.
     {
         DeviceBuffer<scalar> DomegaEff, gammaFace;
-        deviceDEff(F1, nut, in.co.alphaOmega1, in.co.alphaOmega2, scalar(0), DomegaEff);
         if (in.rhoCell)
-        {
-            deviceHadamard(DomegaEff, DomegaEff, *in.rhoCell);
-            DeviceBuffer<scalar> muCell; muCell.resize(nC);
-            deviceHadamard(muCell, *in.nuCell, *in.rhoCell);
-            deviceAxpy(1.0, muCell, DomegaEff);
-        }
+            deviceDEffRho(F1, nut, in.co.alphaOmega1, in.co.alphaOmega2, *in.rhoCell, *in.nuCell, DomegaEff);   // FP-2
+        else
+            deviceDEff(F1, nut, in.co.alphaOmega1, in.co.alphaOmega2, scalar(0), DomegaEff);
         deviceInterpolate(dm, DomegaEff, gammaFace);
 
         PressureMatrix M;
@@ -660,14 +655,10 @@ void correct(
     // ---- the k equation -----------------------------------------------------------------------
     {
         DeviceBuffer<scalar> DkEff, gammaFace;
-        deviceDEff(F1, nut, in.co.alphaK1, in.co.alphaK2, scalar(0), DkEff);
         if (in.rhoCell)
-        {
-            deviceHadamard(DkEff, DkEff, *in.rhoCell);
-            DeviceBuffer<scalar> muCell; muCell.resize(nC);
-            deviceHadamard(muCell, *in.nuCell, *in.rhoCell);
-            deviceAxpy(1.0, muCell, DkEff);
-        }
+            deviceDEffRho(F1, nut, in.co.alphaK1, in.co.alphaK2, *in.rhoCell, *in.nuCell, DkEff);   // FP-2
+        else
+            deviceDEff(F1, nut, in.co.alphaK1, in.co.alphaK2, scalar(0), DkEff);
         deviceInterpolate(dm, DkEff, gammaFace);
 
         // k_'s own boundary refresh, at OpenFOAM's point for it: the fvMatrix constructor at
