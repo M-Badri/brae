@@ -210,6 +210,10 @@ struct RhoStepInput
     // gated against. Both point at the ONE DeviceDilu the driver builds -- see RhoSolverWorkspace::dilu.
     const DeviceDilu* preconU  = nullptr;
     const DeviceDilu* preconHe = nullptr;
+    // ...or, on the energy solve, the truncated Neumann series of this degree (1 = plain Jacobi): the
+    // FP-2 policy hands a relaxed `preconditioner DILU` entry the series the pair already takes
+    // (rhoSimpleFoamDriver.cu, BRAE_DILU_HE=1 keeps DILU). Only read when preconHe is null.
+    int    polyDegHe = 1;
     // The TRANSONIC pressure: fvm::div(phid, p) makes the matrix asymmetric, PCG is invalid on it, and
     // the step runs BiCGStab. DILU here only when the driver opted in (BRAE_DILU_P=1 on a case whose
     // p entry names it); null keeps the diagonal, the default, because DILU's level-scheduled apply

@@ -2543,6 +2543,19 @@ add_test(NAME scalar_colour_gs_vs_openfoam
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/scalar_colour_gs_vs_openfoam.sh)
 set_tests_properties(scalar_colour_gs_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200)
 
+# D-1: the CUDA arm is bit-reproducible run to run on squareBendLiq, injectorPipe and squareBend, and the
+# atomic bound() scatter it replaced (BRAE_BOUND_SCATTER=1) is seen to drift. Slow: it meshes injectorPipe.
+add_test(NAME rho_run_to_run_identity
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_run_to_run_identity.sh)
+set_tests_properties(rho_run_to_run_identity PROPERTIES SKIP_RETURN_CODE 77 LABELS slow TIMEOUT 2400)
+
+# FP-2 policy: a relaxed `preconditioner DILU` entry on k, omega/epsilon and the energy field takes the
+# Neumann series on the CUDA arm, announced, with BRAE_DILU_KE/HE=1 keeping DILU; held against OpenFOAM
+# on the aerofoil at the tutorial's own relTol, with the health (bounding) and the speed asserted.
+add_test(NAME rho_dilu_entry_policy_vs_openfoam
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_dilu_entry_policy_vs_openfoam.sh)
+set_tests_properties(rho_dilu_entry_policy_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200)
+
 # rhoSimpleFoam's UEqn.H against OpenFOAM's own assembled momentum matrix (tools/dumpPEqn stage harness:
 # rAU, internalCoeffs, boundaryCoeffs). OpenFOAM's muEff is injected so this measures the ASSEMBLY and not
 # the unported compressible turbulence closure. Carries the control that distinguishes the compressible

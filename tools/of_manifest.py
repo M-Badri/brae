@@ -513,7 +513,15 @@ COMPONENTS = {
                   "lowerBound): a cell that solved NEGATIVE takes the area-weighted average of its "
                   "neighbours, and only a merely-small cell is floored. Both lower bounds are SMALL, "
                   "so the floor and OpenFOAM agree everywhere except the negative cell -- which is "
-                  "exactly the cell that matters."),
+                  "exactly the cell that matters. CUDA (kEpsilon.cu boundField, shared with kOmegaSST): "
+                  "the average is ONE GATHER PER CELL in OpenFOAM's face order (fvcSurfaceIntegrate.C: "
+                  "owner faces and losort-ordered neighbour faces merged by face index, then the boundary "
+                  "faces), not the atomicAdd scatter it was until 2026-09-12 -- that scatter summed a "
+                  "clamped cell's faces in hardware order, and was the D-1 run-to-run drift: squareBendLiq "
+                  "and injectorPipe wrote different low bits between two runs of one binary (first "
+                  "differing stage epsOut at iteration 4 with epsSolveOut identical). "
+                  "tests/rho_run_to_run_identity.sh holds three tutorials byte-identical over two "
+                  "20-iteration runs, with BRAE_BOUND_SCATTER=1 as the control that still drifts."),
 
         # ---- MRF / fvOptions -----------------------------------------------------------------
         dict(name="MRFZoneList", of_symbol="Foam::MRFZoneList",
@@ -611,7 +619,25 @@ COMPONENTS = {
                   "and loses at 817 and 1665 (307k: 121.5 -> 135.4; 896k: 257 -> 396). The rule moved from "
                   "128 to 512, and the widest-level guard went (the block strides a level). On the aerofoil "
                   "the DILU level kernels were 862 of the turbulence phase's 1081 launches per iteration "
-                  "and 449 of the energy phase's 539 (nsys, --cuda-graph-trace=node)."),
+                  "and 449 of the energy phase's 539 (nsys, --cuda-graph-trace=node). THE ENTRY POLICY, "
+                  "decided 2026-09-12 (rhoSimpleFoamDriver.cu, the CUDA arm): a `preconditioner DILU` "
+                  "entry on k, epsilon/omega or the energy field takes the truncated Neumann series "
+                  "wherever fvMatrix::relax bounds it -- the derivation the pair already takes on a GAMG "
+                  "entry, factored into neumannDegreeIfRelaxed (linear_solver_setup.cuh), degree "
+                  "ceil(ln 0.1 / ln alpha) capped at 24 -- announced per field as [approximated]; "
+                  "BRAE_DILU_KE=1 and BRAE_DILU_HE=1 keep DILU, and an unrelaxed entry keeps it "
+                  "regardless. Measured: aerofoil 3x100 iterations, turbulence 3.2 -> 1.6-1.8 ms/it, "
+                  "energy 1.9 -> 1.2-1.4, four phases 10.0-10.2 -> 7.7-8.4 (1.0x 20 cores per "
+                  "iteration); sbMatched at ITS pinned 1e-12 relTol 0 (degrees 22 and 11), turbulence "
+                  "79 -> 13.5 and energy 30 -> 5.1 ms/it with the iteration-20 residual line identical to "
+                  "five digits. Gate tests/rho_dilu_entry_policy_vs_openfoam.sh against real OpenFOAM on "
+                  "the aerofoil at its own relTol: the series' k/omega/e residuals within [0.9, 1.2] of "
+                  "OpenFOAM's (measured 1.07, 1.04, 1.03) and DILU-kept within [0.9, 1.1] (1.00, 1.00, "
+                  "1.01), no bounding on either arm, turbulence under 0.8x (0.59x). The two assembly "
+                  "gates that hold sbMatched at 1e-10 with the solvers pinned (rho_sbmatched_transient, "
+                  "rho_gradp_lsq_simplec) keep DILU through the hatches, since at 1e-12 the residual "
+                  "leaves the iterate free at about 1e-9 and only OpenFOAM's own algorithm lands on "
+                  "OpenFOAM's iterate; their bounds are unchanged."),
         dict(name="GAMGSolver", of_symbol="Foam::GAMGSolver",
              of_file="src/OpenFOAM/matrices/lduMatrix/solvers/GAMG/GAMGSolver.C",
              classification="LINEAR_SOLVER", status="UNSUPPORTED",

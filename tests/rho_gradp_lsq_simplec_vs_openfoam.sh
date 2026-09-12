@@ -101,7 +101,8 @@ for v in ship lsq; do
     echo "== $v: $( [ $v = ship ] && echo 'shipped, Gauss grad(p) -- the control' || echo 'grad(p) leastSquares' ) =="
     for M in 1 cuda; do
         stage "$W/br_${v}_$M" $v
-        if BRAE_RHOSIMPLEFOAM_MIRROR=$M "$BRAE" -case "$W/br_${v}_$M" > "$W/br_${v}_$M/log" 2>&1 && [ -d "$W/br_${v}_$M/$ITERS" ]; then
+        # BRAE_DILU_KE/HE=1 on the device arm: the case's DILU kept, see the limited arm below.
+        if BRAE_DILU_KE=1 BRAE_DILU_HE=1 BRAE_RHOSIMPLEFOAM_MIRROR=$M "$BRAE" -case "$W/br_${v}_$M" > "$W/br_${v}_$M/log" 2>&1 && [ -d "$W/br_${v}_$M/$ITERS" ]; then
             compare "$W/br_${v}_$M" "$W/of_$v" "$( [ $M = cuda ] && echo CUDA || echo host ) vs OpenFOAM" "$BOUND" 0 || fail=1
         else
             echo "     $M: DID NOT RUN   FAIL"; grep -v '^brae NOTICE' "$W/br_${v}_$M/log" | tail -3; fail=1
@@ -128,7 +129,12 @@ else
     echo "     host: DID NOT RUN   FAIL"; grep -v '^brae NOTICE' "$W/br_lim_1/log" | tail -3; fail=1
 fi
 stage "$W/br_lim_cuda" lim
-if BRAE_RHOSIMPLEFOAM_MIRROR=cuda "$BRAE" -case "$W/br_lim_cuda" > "$W/br_lim_cuda/log" 2>&1 && [ -d "$W/br_lim_cuda/$ITERS" ]; then
+# BRAE_DILU_KE=1 BRAE_DILU_HE=1: the FP-2 policy (2026-09-12) answers sbMatched's relaxed
+# `preconditioner DILU` entries on k, epsilon and e with the Neumann series; at the pinned 1e-14 relTol 0
+# the residual leaves the iterate free at about 1e-9 (the series measured nut 5.4e-10 against this
+# gate's 1e-10 bound; DILU, OpenFOAM's own algorithm, 2e-11), so an assembly gate at 1e-10 keeps the
+# oracle's preconditioner. Bounds unchanged.
+if BRAE_DILU_KE=1 BRAE_DILU_HE=1 BRAE_RHOSIMPLEFOAM_MIRROR=cuda "$BRAE" -case "$W/br_lim_cuda" > "$W/br_lim_cuda/log" 2>&1 && [ -d "$W/br_lim_cuda/$ITERS" ]; then
     compare "$W/br_lim_cuda" "$W/of_lim" "CUDA vs OpenFOAM" "$BOUND" 0 || fail=1
 else
     echo "     CUDA: DID NOT RUN   FAIL"; grep -v '^brae NOTICE' "$W/br_lim_cuda/log" | tail -3; fail=1

@@ -158,6 +158,24 @@ struct TurbPreconChoice
     bool dilu = false;
     int  polyDeg = 1;                                  // 1 == plain Jacobi (the series' first term)
 };
+// The series' degree for `field` when fvMatrix::relax bounds it, 0 when it does not (no relaxation
+// factor below 1, or a degree past POLY_DEG_KE_MAX). The one derivation turbPreconFor uses and the
+// rhoSimpleFoam mirror's DILU-entry policy reuses (FP-2).
+inline int neumannDegreeIfRelaxed(const FoamDict& fvSolution, const std::string& field)
+{
+    const FoamDict* rf = fvSolution.subDict("relaxationFactors");
+    const FoamDict* eqs = rf ? rf->subDict("equations") : nullptr;
+    const FoamDict* src = eqs ? eqs : rf;
+    scalar alpha = 1.0;
+    if (src)
+    {
+        const scalar a0 = src->scalarOr(field, scalar(1));
+        alpha = std::fmax(a0, src->found(field + "Final") ? src->scalarOr(field + "Final", a0) : a0);
+    }
+    if (!(alpha < scalar(1))) return 0;
+    const int d = static_cast<int>(std::ceil(std::log(POLY_TAU) / std::log(static_cast<double>(alpha))));
+    return (d <= POLY_DEG_KE_MAX) ? std::max(2, d) : 0;
+}
 inline TurbPreconChoice turbPreconFor(const FoamDict* solvers,
                                       const FoamDict& fvSolution,
                                       const std::string& field,
@@ -174,23 +192,11 @@ inline TurbPreconChoice turbPreconFor(const FoamDict* solvers,
     // The blank a substitution leaves. fvMatrix::relax forces D >= sum|offdiag| and THEN divides by the
     // factor (fvMatrix.C:105-113), so a relaxed equation has sum|offdiag|/|a_ii| <= alpha and the series'
     // ratio is bounded by alpha, mesh-independently. Take the LARGEST factor that will be applied: a
-    // `".*Final" 1.0` corrector has no bound even where the ordinary factor does.
-    const FoamDict* rf = fvSolution.subDict("relaxationFactors");
-    const FoamDict* eqs = rf ? rf->subDict("equations") : nullptr;
-    const FoamDict* src = eqs ? eqs : rf;
-    scalar alpha = 1.0;
-    if (src)
-    {
-        const scalar a0 = src->scalarOr(field, scalar(1));
-        alpha = std::fmax(a0, src->found(field + "Final") ? src->scalarOr(field + "Final", a0) : a0);
-    }
-    if (alpha < scalar(1))
-    {
-        const int d = static_cast<int>(std::ceil(std::log(POLY_TAU) / std::log(static_cast<double>(alpha))));
-        if (d <= POLY_DEG_KE_MAX) c.polyDeg = std::max(2, d);
-        else                      c.dilu = true;       // more terms than are validated -> the factorisation
-    }
-    else                   c.dilu = true;              // no bound -> the factorisation, which needs none
+    // `".*Final" 1.0` corrector has no bound even where the ordinary factor does
+    // (neumannDegreeIfRelaxed). No bound, or more terms than are validated -> the factorisation.
+    const int deg = neumannDegreeIfRelaxed(fvSolution, field);
+    if (deg > 0) c.polyDeg = deg;
+    else         c.dilu = true;
     if (const char* e = std::getenv("BRAE_POLY_KE"))
     {
         c.polyDeg = std::max(1, std::atoi(e));

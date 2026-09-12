@@ -24,6 +24,7 @@
 #include "write_control.cuh"
 
 #include <cmath>
+#include <cstdlib>   // getenv: the FP-2 policy hatches
 #include <cstdio>
 #include <filesystem>
 #include <stdexcept>
@@ -481,6 +482,7 @@ int runMirrorCuda(const std::string& caseDir)
     // long as the run.
     bool diluU = false, diluHe = false, diluKE = false;
     int  polyDegKE = 1;                    // the Neumann series' degree on the turbulence pair
+    int  polyDegHe = 1;                    // ...and on the energy field (FP-2 policy below)
     // DILU on the transonic pressure's BiCGStab (see RhoStepInput::preconP) is OPT-IN, BRAE_DILU_P=1,
     // and only where the case's own p entry names it (`solver PBiCGStab; preconditioner DILU;`, as
     // sbMatched does). The default keeps the diagonal and announces the substitution, because the
@@ -700,6 +702,53 @@ int runMirrorCuda(const std::string& caseDir)
         diluHe = lctl.diluHe;
         diluKE = lctl.diluKE;
         polyDegKE = lctl.polyDegKE;
+        // FP-2 POLICY (bench/rhoSimpleFoam/FASTPATH.md, 2026-09-12): a `preconditioner DILU` entry on k,
+        // epsilon/omega or the energy field takes the truncated Neumann series on this arm wherever
+        // fvMatrix::relax bounds it (the same derivation the pair already takes on a GAMG entry,
+        // neumannDegreeIfRelaxed). DILU's apply is a sequential level walk: on aerofoilNACA0012 (121
+        // levels) the k and omega solves were 862 of the turbulence phase's 1081 kernel launches per
+        // iteration and 74% of its GPU time, and the single-block walk that halved that is still 1.7 of
+        // the phase's 2.25 GPU ms; the series is d sparse products. Same converged solution, a different
+        // iterate at a loose relTol -- the momentum sweep's trade, and announced the same way, per field.
+        // BRAE_DILU_KE=1 / BRAE_DILU_HE=1 keep DILU, which is what the gates that hold an exact iterate
+        // at the case's own relTol pin; an entry with no relaxation bound keeps DILU regardless.
+        {
+            auto keeps = [](const char* name) { const char* e = std::getenv(name); return e && std::atoi(e) != 0; };
+            auto announce = [&](const std::string& f, int deg)
+            {
+                const FoamDict* e = solversDict ? solversDict->subDict(f) : nullptr;
+                if (!e || e->wordOr("preconditioner", "") != "DILU") return;
+                noticeApproximated("solvers/" + f + " preconditioner",
+                                   "case asks 'DILU', brae preconditions with a degree-" + std::to_string(deg)
+                                 + " truncated Neumann series -- the same linear system and tolerance, a different "
+                                   "iterate at a loose relTol; DILU's apply is a sequential level walk where the "
+                                   "series is " + std::to_string(deg) + " sparse products (FP-2, aerofoilNACA0012: "
+                                   "the DILU k/omega solves were 74% of the turbulence phase). BRAE_DILU_"
+                                 + std::string(f == hf.heName ? "HE" : "KE") + "=1 keeps DILU");
+            };
+            if (diluKE && !keeps("BRAE_DILU_KE"))
+            {
+                const int deg = std::max(neumannDegreeIfRelaxed(fvSolution, "k"),
+                                         neumannDegreeIfRelaxed(fvSolution, secondName));
+                if (deg > 1)
+                {
+                    diluKE = false;
+                    polyDegKE = deg;
+                    announce("k", deg);
+                    announce(secondName, deg);
+                }
+            }
+            if (diluHe && !keeps("BRAE_DILU_HE"))
+            {
+                const int deg = neumannDegreeIfRelaxed(fvSolution, hf.heName);
+                if (deg > 1)
+                {
+                    diluHe = false;
+                    polyDegHe = deg;
+                    announce(hf.heName, deg);
+                }
+            }
+        }
         // The case's own smoothSolver selection, carried into the step (item 58). Without these the
         // driver ran BiCGStab on U, he, k and epsilon while the shared notice -- which takes the flag as
         // proof the caller honours the dict -- announced nothing for U and the pair.
@@ -805,6 +854,7 @@ int runMirrorCuda(const std::string& caseDir)
     }
     gin.preconU  = (diluU  && w.dilu.valid) ? &w.dilu : nullptr;
     gin.preconHe = (diluHe && w.dilu.valid) ? &w.dilu : nullptr;
+    gin.polyDegHe = polyDegHe;
     // The transonic pressure's BiCGStab takes the same DILU when BRAE_DILU_P=1 opted in (see diluP).
     // The notice above already said DILU, so a schedule that failed to build is refused, not
     // silently replaced by the diagonal it just denied.

@@ -283,3 +283,72 @@ kernels: rho_komegasst_vs_openfoam, rho_sst_device_vs_openfoam, rho_step_cuda_tu
 rho_step_cuda_euler, rho_kepsilon_cuda, turb_limitedlinear_vs_openfoam, rho_turb_limitedlinear_vs_openfoam,
 rho_gasmixing_vs_openfoam, rho_naca_restart_vs_openfoam, rho_tutorials_vs_openfoam -- all at their bounds.
 
+## D-1: the run-to-run drift was Foam::bound's atomic scatter, now a gather in OpenFOAM's order (2026-09-12)
+
+squareBendLiq and gasMixing/injectorPipe wrote different low bits between two runs of ONE binary
+(squareBendLiq: U 1.3591e-01 against 1.3552e-01 at iteration 20, iteration 1 identical), where
+squareBend on the same mesh was bit-identical. Localised with the stage dumps rather than by bisecting
+switches: the first differing stage on squareBendLiq is `epsOut` at iteration 4, with `epsSolveOut`
+identical -- so the epsilon solve agrees to the bit and Foam::bound between the two disagrees. The
+average it takes, fvc::average(max(psi, lowerBound)), was two atomicAdd scatters (faces to owner and
+neighbour, then boundary faces), which sum a clamped cell's faces in whichever order the hardware
+serialises them; a cell that solved negative takes that sum as its value, and from there the two runs
+diverge. squareBend never clamps a cell so it never showed it. The `FP32=0 identical` pairs in the
+FP-2 table were trajectories that happened not to clamp, not evidence.
+
+The average is now one gather per cell in OpenFOAM's own order (fvcSurfaceIntegrate.C:30-46: faces
+in increasing index, owner faces from ownerStart and neighbour faces through losort merged by face
+index, then the boundary faces through bndCellStart/bndPerm), the sum in the same sequence the host
+reference `bound_cpp.cu` takes. `BRAE_BOUND_SCATTER=1` keeps the old scatter as the gate's control.
+
+`tests/rho_run_to_run_identity.sh` (LABELS slow): squareBendLiq, injectorPipe and squareBend, two
+20-iteration runs each, every residual line and every written field (U p T k epsilon omega nut)
+byte-identical; under the scatter control squareBendLiq's two runs differ at iteration 7 (six of six
+pairs differed before the fix). The eight closure gates (rho_kepsilon_cuda, turb_precon,
+rho_sst_device, rho_gasmixing, rho_tutorials, rho_patch_expression, rho_komegasst,
+rho_step_cuda_turbulent) pass at their bounds; the gather is one launch where the scatter was two and
+is not on any phase's clock. injectorPipe can now witness bit-identity for the next fusion.
+
+## FP-2, the decision: a relaxed `PBiCGStab`+`DILU` entry takes the Neumann series (2026-09-12)
+
+The row's open question, answered by measurement. On the CUDA arm a `preconditioner DILU` entry on k,
+epsilon/omega or the energy field now takes the truncated Neumann series wherever fvMatrix::relax
+bounds it -- the same derivation the pair already takes on a GAMG entry (`neumannDegreeIfRelaxed`,
+degree d = ceil(ln 0.1 / ln alpha), capped at 24) -- announced per field as `[approximated]`, with
+`BRAE_DILU_KE=1` and `BRAE_DILU_HE=1` keeping DILU. An entry with no relaxation bound keeps DILU
+regardless. Same linear system, same tolerance, a different iterate where the tolerance leaves one
+free; the momentum sweep's trade, stated the same way.
+
+Aerofoil, three runs of 100 iterations, the same staging as before (the tutorial's own tolerances):
+
+| phase       | DILU kept (3 runs) | series (3 runs) |
+|-------------|-------------------:|----------------:|
+| turbulence  |    3.2 / 3.2 / 3.2 |  1.8 / 1.6 / 1.7 |
+| EEqn        |    1.9 / 1.9 / 1.9 |  1.4 / 1.3 / 1.2 |
+| he solve    |    1.1 / 1.1 / 1.1 |  0.3 / 0.3 / 0.3 |
+| four phases | 10.1 / 10.2 / 10.0 |  8.4 / 7.7 / 7.8 |
+
+Against 20 cores' 8 ms per iteration that is 1.0x per iteration (from 0.62x when the row opened and
+0.89x after the walk rule). At iteration 100 the two arms' residual lines agree to two digits (U
+2.506e-03 against 2.503e-03, k 5.34e-04 against 5.20e-04): the series stops the solve elsewhere under
+relTol 0.1 and that is all it moves.
+
+sbMatched at ITS pinned solvers (tolerance 1e-12, relTol 0; relaxation k, epsilon 0.9 and e 0.8, so
+degrees 22 and 11), 20 iterations: turbulence 13.5 ms/it against DILU's 79, EEqn 5.1 against 30, the
+iteration-20 residual line identical to five digits. So the series is not a loose-relTol trick: at a
+tight tolerance the DILU walk's 112k-cell level schedule is what BiCGStab pays on every iteration.
+
+Gate: `tests/rho_dilu_entry_policy_vs_openfoam.sh` -- the aerofoil, 30 iterations at its own tolerances,
+series against DILU-kept against real OpenFOAM: the notices (and their absence under the hatches,
+with the DILU walk built only where something asks for it); k, omega and e initial residuals at
+iteration 30 within [0.9, 1.2] of OpenFOAM's for the series (measured 1.07, 1.04, 1.03) and [0.9, 1.1]
+for DILU kept (1.00, 1.00, 1.01); no `bounding` line on either arm; the series' turbulence phase under
+0.8x DILU's (0.59x). Both arms are deterministic since D-1, so the bounds are the measurement rounded
+outward.
+
+Two gates pin DILU with the hatches, and say why in their headers: `rho_sbmatched_transient` and
+`rho_gradp_lsq_simplec` hold the ASSEMBLY at 1e-10 with the solvers pinned to 1e-12 / 1e-14, and at
+those tolerances the residual leaves the iterate free at about 1e-9 (the series lands k 5.4e-09,
+epsilon 3.3e-09 from OpenFOAM's; DILU, OpenFOAM's own algorithm, 8e-12). Their bounds are unchanged.
+The rest ran on the new default: `ctest -R rho -LE slow` (72), rho_sst_device, rho_naca_restart,
+rho_tutorials, rho_run_to_run_identity, sa_precon, turb_precon, precon_policy_one_rule -- all pass.

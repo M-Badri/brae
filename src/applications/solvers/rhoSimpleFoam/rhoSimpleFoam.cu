@@ -1058,7 +1058,7 @@ Residuals rhoSimpleStep(
                                  in.nSweepsHe, in.heGaussSeidelSymmetric);
         else
             perf = deviceJacobiBiCGStab(A, b, f.he, dnf.data(), in.tolHe, in.relTolHe, in.maxIterHe, /*checkEvery=*/1, in.minIterHe,
-                                        in.preconHe);
+                                        in.preconHe, /*amg=*/nullptr, in.polyDegHe);
         solveMarkEnd(&g_tEsol);
         res[in.isE ? "e" : "h"] = perf.initialResidual;
 
