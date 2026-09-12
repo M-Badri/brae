@@ -272,6 +272,68 @@ __global__ void boundGatherBndKernel(
 }
 
 
+// D-1 (2026-09-12): the two scatter kernels above accumulate num/den with atomicAdd, and the order in
+// which a cell's faces land is whatever the hardware scheduled -- so the average bound() clamps a cell
+// to differed in its last bits from run to run, and squareBendLiq and gasMixing/injectorPipe were not
+// bit-reproducible (two runs of one binary: identical through the epsilon solve of iteration 4, then
+// epsOut apart, then everything downstream). This GATHER forms each cell's two sums in OpenFOAM's own
+// order -- surfaceSum's face loop adds a face to its owner and then its neighbour as the face index
+// increases (fvcSurfaceIntegrate.C:30-34), so a cell receives its contributions in increasing face
+// index over BOTH sides, then its boundary faces patch by patch (:36-46) -- which is also the order the
+// host reference (bound_cpp.cu) sums in. Deterministic, and bit-identical to that reference on the same
+// capped field. The scatter stays under BRAE_BOUND_SCATTER=1 as the control tests/rho_run_to_run_identity.sh
+// runs.
+__global__ void boundGatherCellKernel(
+    int           nC,
+    const label*  __restrict__ ownerStart,
+    const label*  __restrict__ nei,
+    const label*  __restrict__ owner,
+    const label*  __restrict__ losort,
+    const label*  __restrict__ losortStart,
+    const scalar* __restrict__ w,
+    const scalar* __restrict__ magSf,
+    const scalar* __restrict__ x,
+    scalar        floorV,
+    const label*  __restrict__ bndCellStart,   // null: no boundary faces
+    const label*  __restrict__ bndPerm,
+    const scalar* __restrict__ bndMagSf,
+    const scalar* __restrict__ bval,
+    scalar*       __restrict__ num,
+    scalar*       __restrict__ den)
+{
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= nC) return;
+    scalar n = 0.0, d = 0.0;
+    label i = ownerStart[c], iEnd = ownerStart[c + 1];     // faces c owns, in increasing face index
+    label k = losortStart[c], kEnd = losortStart[c + 1];   // faces c neighbours, losort[k] increasing
+    while (i < iEnd || k < kEnd)
+    {
+        const label fo = (i < iEnd) ? i : INT_MAX;
+        const label fn = (k < kEnd) ? losort[k] : INT_MAX;
+        label f;
+        if (fo < fn) { f = fo; ++i; }
+        else         { f = fn; ++k; }
+        const scalar co = fmax(x[owner[f]], floorV);
+        const scalar cn = fmax(x[nei[f]], floorV);
+        const scalar vf = w[f] * co + (scalar(1.0) - w[f]) * cn;
+        const scalar a  = magSf[f];
+        n += a * vf;
+        d += a;
+    }
+    if (bndCellStart)
+    {
+        for (label q = bndCellStart[c]; q < bndCellStart[c + 1]; ++q)
+        {
+            const label b = bndPerm[q];
+            const scalar a = bndMagSf[b];
+            n += a * fmax(bval[b], floorV);
+            d += a;
+        }
+    }
+    num[c] = n;
+    den[c] = d;
+}
+
 __global__ void boundApplyKernel(
     int           nC,
     const scalar* num,
@@ -744,21 +806,36 @@ void boundField(
     DeviceBuffer<scalar> num, den;
     zeroed(num, nC);
     zeroed(den, nC);
-    boundGatherKernel<<<nBlk(dm.nInternalFaces), TPB>>>(dm.nInternalFaces, dm.owner.data(), dm.nei.data(),
-                                                        dm.w.data(), dm.magSf.data(), x.data(), floorV,
-                                                        num.data(), den.data());
-    cudaCheck(cudaGetLastError(), "kEpsilon bound gather");
-
     // The BOUNDARY faces are part of the same average, and they contribute the PATCH value rather than
     // the cell's. Omitting them is not a small error: on a wall-adjacent cell the wall face is a large
     // part of the total area, and bound() fires exactly there.
-    if (db.n)
+    DeviceBuffer<scalar> bval;
+    if (db.n) deviceBCValue(db, x, bval);
+    // D-1: the per-cell gather in OpenFOAM's face order is the default; BRAE_BOUND_SCATTER=1 restores
+    // the atomic scatter, which is the control tests/rho_run_to_run_identity.sh runs.
+    static const bool scatter = std::getenv("BRAE_BOUND_SCATTER") != nullptr;
+    if (!scatter)
     {
-        DeviceBuffer<scalar> bval;
-        deviceBCValue(db, x, bval);
-        boundGatherBndKernel<<<nBlk(db.n), TPB>>>(db.n, dm.bndCell.data(), db.magSf.data(), bval.data(),
-                                                  floorV, num.data(), den.data());
-        cudaCheck(cudaGetLastError(), "kEpsilon bound gather boundary");
+        boundGatherCellKernel<<<nBlk(nC), TPB>>>(
+            nC, dm.ownerStart.data(), dm.nei.data(), dm.owner.data(), dm.losort.data(), dm.losortStart.data(),
+            dm.w.data(), dm.magSf.data(), x.data(), floorV,
+            db.n ? dm.bndCellStart.data() : nullptr, db.n ? dm.bndPerm.data() : nullptr,
+            db.n ? db.magSf.data() : nullptr, db.n ? bval.data() : nullptr,
+            num.data(), den.data());
+        cudaCheck(cudaGetLastError(), "kEpsilon bound gather (cell)");
+    }
+    else
+    {
+        boundGatherKernel<<<nBlk(dm.nInternalFaces), TPB>>>(dm.nInternalFaces, dm.owner.data(), dm.nei.data(),
+                                                            dm.w.data(), dm.magSf.data(), x.data(), floorV,
+                                                            num.data(), den.data());
+        cudaCheck(cudaGetLastError(), "kEpsilon bound gather");
+        if (db.n)
+        {
+            boundGatherBndKernel<<<nBlk(db.n), TPB>>>(db.n, dm.bndCell.data(), db.magSf.data(), bval.data(),
+                                                      floorV, num.data(), den.data());
+            cudaCheck(cudaGetLastError(), "kEpsilon bound gather boundary");
+        }
     }
 
     boundApplyKernel<<<nBlk(nC), TPB>>>(nC, num.data(), den.data(), floorV, x.data());
