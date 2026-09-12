@@ -8,10 +8,11 @@
 # and on rhoBox (79 levels, widest 20) 651 against 156. A cooperative grid-barrier walk was measured too
 # and is NOT the answer: 268 grid barriers cost what 268 launches cost (1111 us against 1106).
 #
-# Which walk a mesh TAKES is decided on the mean level width (128), because in production the apply is
-# captured in the BiCGStab graph, where a launch is a cheap graph node and one block is one SM: measured
-# end to end, the single block wins on pitzDailyTurb (mean 47) and loses on sbMatched (mean 418). That is
-# a performance switch; this gate is about the arithmetic, so it FORCES each walk with BRAE_DILU_SINGLE
+# Which walk a mesh TAKES is decided on the mean level width (512 since FP-2, 2026-09-12; 128 before),
+# because in production the apply is captured in the BiCGStab graph, where a launch is a cheap graph node
+# and one block is one SM: measured end to end, the single block wins up to a mean of 417 (squareBend at
+# 112k) and loses from 817 (the same case at 307k) -- the table is in device_dilu.cu. That is a
+# performance switch; this gate is about the arithmetic, so it FORCES each walk with BRAE_DILU_SINGLE
 # and BRAE_DILU_PER_LEVEL and asserts from the log which one ran.
 #
 # Correct for the reason the Gauss-Seidel single-block walk is (item 60): cells at one level share no

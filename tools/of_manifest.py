@@ -601,7 +601,17 @@ COMPONENTS = {
              classification="LINEAR_SOLVER", status="REUSE_EXISTING",
              brae_existing="src/cuda/device_dilu.cu",
              brae_target="src/matrices/lduMatrix/preconditioners/DILUPreconditioner/",
-             note="Level-scheduled, bit-identical to OpenFOAM."),
+             note="Level-scheduled, bit-identical to OpenFOAM. TWO WALKS OF THE SAME LEVELS, same bits "
+                  "(tests/dilu_single_block_identity.sh): one kernel launch per level, or ONE thread block "
+                  "walking every level with __syncthreads between them. Which one runs is a speed rule on "
+                  "the mean level width. FP-2 (bench/rhoSimpleFoam/FASTPATH.md, 2026-09-12) re-measured it "
+                  "end to end after the graphs and the mailbox landed: the single block wins at mean 132 "
+                  "(aerofoilNACA0012, 121 levels: turbulence 5.8 -> 3.3 ms/it, energy 3.2 -> 2.1), 205 and "
+                  "417 (squareBend at 38k and 112k with DILU on every field: 36 -> 22 and 57.5 -> 47.9 ms/it) "
+                  "and loses at 817 and 1665 (307k: 121.5 -> 135.4; 896k: 257 -> 396). The rule moved from "
+                  "128 to 512, and the widest-level guard went (the block strides a level). On the aerofoil "
+                  "the DILU level kernels were 862 of the turbulence phase's 1081 launches per iteration "
+                  "and 449 of the energy phase's 539 (nsys, --cuda-graph-trace=node)."),
         dict(name="GAMGSolver", of_symbol="Foam::GAMGSolver",
              of_file="src/OpenFOAM/matrices/lduMatrix/solvers/GAMG/GAMGSolver.C",
              classification="LINEAR_SOLVER", status="UNSUPPORTED",

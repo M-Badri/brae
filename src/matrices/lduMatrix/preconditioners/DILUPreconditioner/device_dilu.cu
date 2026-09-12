@@ -56,11 +56,21 @@ __global__ void diluDiagLevelK(
 //     sbMatched      112,000 cells, 268 levels, mean 418   single-block 307 ms/it, per-level 291  LOSS
 //     pitzDailyTurb   12,225 cells, 261 levels, mean  47   single-block  17.4,     per-level 18.8  GAIN
 // One block is one SM: it wins while a level's work fits comfortably there and loses when the level is
-// wide enough that the other 47 SMs were doing useful work. The threshold is the mean width, set at 128
-// -- above pitzDailyTurb's 47 and T3A's 58, well below sbMatched's 418 -- and it is a PERFORMANCE
-// switch only: both walks compute the same bits, which is what the gate holds.
+// wide enough that the other 47 SMs were doing useful work. The threshold is the mean width, and it is a
+// PERFORMANCE switch only: both walks compute the same bits, which is what the gate holds.
+//
+// RE-MEASURED 2026-09-12 (FP-2), after the solver loops went into graphs and the readbacks into the
+// mailbox, the four phases in ms per outer iteration with DILU on U, e, k and epsilon, both walks forced:
+//     aerofoilNACA0012  16,000 cells, 121 levels, mean  132, widest  200   per-level 14.1  single  10.4  GAIN
+//     squareBend x0.7   38,416 cells, 187 levels, mean  205, widest  392   per-level 36.0  single  22.0  GAIN
+//     squareBend x1    112,000 cells, 268 levels, mean  417, widest  800   per-level 57.5  single  47.9  GAIN
+//     squareBend x1.4  307,328 cells, 376 levels, mean  817, widest 1568   per-level 121.5 single 135.4  LOSS
+//     squareBend x2    896,000 cells, 538 levels, mean 1665, widest 3200   per-level 257.4 single 396.1  LOSS
+// The 2026-09-08 table above (sbMatched a LOSS at mean 418) no longer holds on the same mesh size: what
+// the per-level walk pays per launch grew relative to what one block pays per level once every other
+// gap in the loop was removed. The crossover sits between 417 and 817; the rule is 512.
 constexpr int TPB_SINGLE_D = 1024;
-constexpr int DILU_SINGLE_MEAN_MAX = 128;
+constexpr int DILU_SINGLE_MEAN_MAX = 512;   // FP-2 measurement, see diluSingleBlock
 
 __global__ void __launch_bounds__(1024) diluDiagSingleK(
     const label* __restrict__ off, int nLevels, const label* __restrict__ cells,
@@ -138,8 +148,16 @@ bool diluSingleBlock(const DeviceDilu& d)
     // sbMatched is the one whose applies dominate, so it is the one identity matters most on.
     static const bool forceSingle = std::getenv("BRAE_DILU_SINGLE") != nullptr;
     const int levels = d.levels();
-    const bool fits  = d.maxLevelWidth > 0 && d.maxLevelWidth <= TPB_SINGLE_D && levels > 0;
-    const bool single = fits && !forceLevels
+    // FP-2 (bench/rhoSimpleFoam/FASTPATH.md, 2026-09-12): the mean-width rule was 128, set from two
+    // points (pitzDailyTurb mean 47 wins, sbMatched mean 418 loses) measured before the solver loops
+    // went into graphs and the readbacks into the mailbox. Re-measured end to end, the single block now
+    // wins at every width tried -- aerofoilNACA0012 (121 levels, mean 132): turbulence 5.8 -> 3.3 ms/it,
+    // energy 3.2 -> 2.1; squareBend at 38k with DILU on every field (187 levels, mean 205): the four
+    // phases 36 -> 22 ms/it; at 112k (268 levels, mean 417, widest 800): 57.5 -> 47.9 -- so the rule
+    // is 512 and the `fits` guard is gone: the single-block kernels stride a level in blockDim
+    // chunks, so a level wider than the block is a speed question, not a correctness one, and the
+    // mean-width rule already answers it. BRAE_DILU_PER_LEVEL=1 restores the launches.
+    const bool single = levels > 0 && !forceLevels
                      && (forceSingle || (d.nCells / levels) <= DILU_SINGLE_MEAN_MAX);
     static bool announced = false;
     if (!announced && levels > 0)

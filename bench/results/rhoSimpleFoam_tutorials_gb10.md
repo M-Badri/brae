@@ -196,3 +196,51 @@ The slowest tutorial relative to 20 cores, squareBendLiq, goes from 0.70x to 1.3
 two smoothSolver cases that were behind are at parity or ahead. squareBend and the aerofoil name no
 smoothSolver on their scalars and are untouched.
 
+## FP-2, first lever: the DILU walk on the aerofoil is the cost, not the closure (2026-09-12)
+
+The second tracker row asked why kOmegaSST costs 356 ns per cell on the 16k aerofoil. An nsys profile
+(20 iterations, `--cuda-graph-trace=node` so the kernels inside the solver graphs are counted, NVTX
+phase ranges from `BRAE_PHASE_NVTX=1`) attributes every kernel to its phase:
+
+| phase      | launches per iteration | of which DILU level kernels | GPU ms/it | wall ms/it (phase timer) |
+|------------|-----------------------:|----------------------------:|----------:|-------------------------:|
+| turbulence |                   1081 |                         862 |       2.9 |                      5.8 |
+| EEqn       |                    539 |                         449 |       1.5 |                      3.2 |
+| pEqn       |                   1794 |                           0 |       3.7 |                      3.9 |
+| UEqn       |                    117 |                           0 |       0.5 |                      1.1 |
+
+The case names `PBiCGStab` with `preconditioner DILU` on U, k, omega and e, so k, omega and e each run
+brae's level-scheduled DILU (121 levels on this mesh): one kernel per level per half-sweep, three kernels
+per level per solve counting the factorisation, and the launch gaps between 862 tiny kernels are half the
+turbulence phase's wall. The SST physics itself is about 220 launches and 0.9 ms per iteration.
+
+brae already had a single-block walk of the same levels (item 70, bit-identical, `__syncthreads` between
+levels), selected by a mean-level-width rule of 128 measured on two points before the solver loops went
+into graphs; this mesh reads 132 and took the per-level path. Re-measured end to end with DILU on every
+field and both walks forced, the four phases in ms per iteration:
+
+| case             |   cells | levels | mean width | widest | per-level | single-block |     |
+|------------------|--------:|-------:|-----------:|-------:|----------:|-------------:|-----|
+| aerofoilNACA0012 |  16,000 |    121 |        132 |    200 |      14.1 |         10.4 | win |
+| squareBend x0.7  |  38,416 |    187 |        205 |    392 |      36.0 |         22.0 | win |
+| squareBend x1    | 112,000 |    268 |        417 |    800 |      57.5 |         47.9 | win |
+| squareBend x1.4  | 307,328 |    376 |        817 |   1568 |     121.5 |        135.4 | loss |
+| squareBend x2    | 896,000 |    538 |       1665 |   3200 |     257.4 |        396.1 | loss |
+
+The rule is now 512 (the crossover lies between 417 and 817) and the widest-level guard is gone, since
+the block strides a level in chunks. Both walks compute the same bits, which `dilu_single_block_identity`
+holds on three fixtures; `dilu`, `dilu_vs_openfoam`, `transonic_p_dilu`, `rho_sbmatched_transient`,
+`rho_sst_device`, `rho_komegasst` and `rho_tutorials` all pass unchanged on the new default.
+
+Aerofoil under the new default, three runs of 100 iterations:
+
+| phase       | before (3 runs) | after (3 runs) |
+|-------------|----------------:|---------------:|
+| turbulence  |   5.7 / 5.9 / 5.8 |  3.4 / 3.2 / 3.4 |
+| EEqn        |   3.1 / 3.3 / 3.3 |  2.1 / 2.0 / 1.9 |
+| four phases | 13.7 / 14.4 / 14.1 | 10.6 / 10.0 / 10.3 |
+
+Whole run 1.9 -> 1.5 s at 100 iterations and 3.2 -> 2.4 at 200, so 9 ms per iteration against
+OpenFOAM's 8 on 20 cores (0.89x, from 0.62x) and 1.13x on the 100-iteration wall (from 0.89x). The
+closure's own launches are the next step on this row, worth about 1 ms per iteration here.
+
