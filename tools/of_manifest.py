@@ -418,7 +418,23 @@ COMPONENTS = {
                   "deferred correction is built from the gradient the scheme NAMES, and that correction "
                   "does not vanish at convergence -- so running the plain Gauss gradient under a limited "
                   "name is a different equation, not a slower one. That is what windAroundBuildings was "
-                  "refused for."),
+                  "refused for. SPEED, FP-4 (bench/rhoSimpleFoam/FASTPATH.md, 2026-09-12): this limiter "
+                  "is a THIRD of the momentum phase on gasMixing/injectorPipe -- 4.1 ms/it with the "
+                  "tutorial's schemes, 2.7 with grad(U) unlimited, 2.5 with upwind divergence as well "
+                  "(three runs of 100 iterations each), and 12 launches at 1.90 of the iteration's 13.73 "
+                  "GPU ms. deviceCellLimitGradFused now limits up to three fields in one launch, "
+                  "bit-identical per field (tests/test_cell_limit_grad_fused.cu, ctest "
+                  "cell_limit_grad_fused: memcmp for n=1,2,3 at k=1 and k=0.5, sheared and empty-patch "
+                  "meshes, one-ulp cross-contamination controls, and a control that the limiter bites at "
+                  "all; fail-proof RUN, 10 arms red). IT DID NOT MOVE THE CLOCK, and the measurements say "
+                  "why: 12 launches became 8 and 1.90 ms became 1.74, inside run-to-run noise on the "
+                  "iteration, because the cost is the SIX face-loop passes over scattered neighbour "
+                  "values and fusing N fields removes none of them. Occupancy was excluded (92 registers "
+                  "against 58; capping to 80 moved 0.780 ms to 0.771), and so was pass-sharing: a kernel "
+                  "fusing the gradient's face passes with the limiter's range pass was written, held "
+                  "bit-identical, measured at 1.026 -> 0.999 ms for the two sites it served, and reverted "
+                  "-- the second pass was already L2-resident. What remains is the scheme's own gather "
+                  "traffic."),
 
         dict(name="kEpsilon", of_symbol="Foam::RASModels::kEpsilon",
              of_file="src/TurbulenceModels/turbulenceModels/RAS/kEpsilon/kEpsilon.C",

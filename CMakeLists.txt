@@ -3102,6 +3102,12 @@ target_include_directories(test_lsq_grad_fused PRIVATE ${BRAE_HEADER_DIRS} ${CMA
 target_link_libraries(test_lsq_grad_fused PRIVATE brae_core)
 add_test(NAME lsq_grad_fused COMMAND test_lsq_grad_fused)
 
+# FP-4: and for the cellLimited limiter, whose 9 momentum launches were 44% of that phase.
+add_executable(test_cell_limit_grad_fused tests/test_cell_limit_grad_fused.cu)
+target_include_directories(test_cell_limit_grad_fused PRIVATE ${BRAE_HEADER_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_link_libraries(test_cell_limit_grad_fused PRIVATE brae_core)
+add_test(NAME cell_limit_grad_fused COMMAND test_cell_limit_grad_fused)
+
 # AMG as the preconditioner of the ASYMMETRIC BiCGStab (OpenFOAM's `solver PBiCGStab; preconditioner GAMG`):
 # the answer must not depend on the preconditioner, it must take fewer iterations, and the coarsest solve --
 # a CG on a nonsymmetric operator until now -- is held to a host direct solve with that CG as the fail-proof.

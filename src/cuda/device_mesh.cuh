@@ -312,6 +312,14 @@ struct CellLimitInterface
 void deviceCellLimitGrad(const DeviceMesh& dm, const DeviceBuffer<scalar>& U, const DeviceBuffer<scalar>& Ubnd,
                          DeviceBuffer<scalar>& gx, DeviceBuffer<scalar>& gy, DeviceBuffer<scalar>& gz, scalar k,
                          const CellLimitInterface* ifs = nullptr, int nIfs = 0);
+// The N-field form (FP-4): up to three fields limited in ONE launch that reads the addressing and the
+// face offsets once, bit-identical per field to n separate deviceCellLimitGrad calls
+// (tests/test_cell_limit_grad_fused.cu, memcmp). Coupled interfaces are not handled here -- a caller
+// with them keeps the per-field call, which still runs the five-phase scatter.
+void deviceCellLimitGradFused(const DeviceMesh& dm, int n,
+                              const DeviceBuffer<scalar>* const* U, const DeviceBuffer<scalar>* const* Ubnd,
+                              DeviceBuffer<scalar>* gx, DeviceBuffer<scalar>* gy, DeviceBuffer<scalar>* gz,
+                              scalar k);
 
 // G4: fvm matrix assembly on device, produces the raw lduMatrix coefficients (diag/upper/lower), the
 // boundary internalCoeffs/boundaryCoeffs are folded by the solver (G5). gammafInt / phiInt are nIf-sized.

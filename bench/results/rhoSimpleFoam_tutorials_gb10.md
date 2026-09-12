@@ -444,3 +444,53 @@ file this session touched reverted: `liquid_correct`, `etot`, `hetot`, `linear_s
 aborting or failing the same way at HEAD) and `coupledinterfacescheme_vs_openfoam`, whose pipeCyclic
 run diverges to a non-finite residual at iteration 33 with the HEAD binary exactly as with this one.
 They are open defects on this branch, none of them in what was changed here.
+
+## FP-4: the cellLimited limiter is a third of the momentum phase, and it is the scheme's own cost (2026-09-12)
+
+What the momentum phase spends on gasMixing/injectorPipe (74,650 cells), three runs of 100 iterations
+each, the tutorial's schemes against the same case with pieces removed:
+
+| arm                                            | UEqn ms/it | four phases |
+|------------------------------------------------|-----------:|------------:|
+| the tutorial (limitedLinearV, cellLimited 0.99) | 4.0 / 4.1 / 4.2 | 17.3 / 17.5 / 17.6 |
+| grad(U) unlimited, everything else the same     | 2.7 / 2.7 / 2.7 | 15.7 / 15.1 / 15.2 |
+| upwind divergence, gradients untouched          | 3.6 / 3.6 / 3.6 | 16.6 / 16.4 / 16.9 |
+| upwind and unlimited Gauss                      | 2.5 / 2.5 / 2.5 | 14.4 / 14.4 / 14.5 |
+
+So the cellLimited limiter alone is 1.4 ms of the phase, the limited divergence 0.5, and the limited
+assembly costs 1.64x the upwind one. The row asked for 1.5x.
+
+`deviceCellLimitGradFused` limits up to three fields in one launch, the third of this family after the
+Gauss gradient and the leastSquares fit, bit-identical per field. `tests/test_cell_limit_grad_fused.cu`
+(ctest `cell_limit_grad_fused`) holds it to memcmp for n = 1, 2 and 3, at k = 1 and at k = 0.5 (the
+widening branch), on a sheared box and an empty-patch variant, with one-ulp cross-contamination
+controls both ways and a control asserting the limiter bites at all. Its fail-proof was run: reading
+field 0's range for every field turned 10 arms red. End to end, a reference binary with the FP-4 files
+at HEAD writes byte-identical fields and residual lines on injectorPipe, aerofoilNACA0012 and
+squareBend.
+
+IT DID NOT MOVE THE CLOCK, and that is the row's finding. Launches per iteration went 12 to 8 and their
+GPU time 1.90 to 1.74 ms, inside run-to-run noise on a 13.7 ms iteration; the aerofoil is unchanged too
+(UEqn 1.1 ms/it, four phases 8.2 to 8.4 either way). The limiter's cost is its SIX face-loop passes
+over scattered neighbour values, and fusing N fields removes none of them -- only the re-reads of the
+addressing, which the earlier two fusions had shown to be worth 3x when the passes themselves were the
+traffic.
+
+TWO FURTHER LEVERS WERE MEASURED AND REJECTED, which is the useful part of the row:
+
+- Occupancy. The fused kernel takes 92 registers against the single-field kernel's 58, which halves the
+  blocks per multiprocessor. Capping it to 80 with `__launch_bounds__` moved 0.780 ms to 0.771. Not the
+  constraint; the hint was removed rather than left in place looking like a decision.
+- Pass sharing. The gradient's three face passes and the limiter's range pass read the SAME values at
+  the same faces, so a kernel was written that does both in one pass, nine passes down to six. It was
+  held bit-identical to gradient-then-limiter (memcmp, n = 1, 2, 3, k = 1 and 0.5, both meshes) and
+  measured: the two sites it served went 1.026 to 0.999 ms per iteration, 0.04 of 13.7. The second pass
+  was already L2-resident, so sharing it bought the loop overhead and nothing else. Reverted rather than
+  kept as 200 lines of duplicated arithmetic that would have to stay bit-identical to two other kernels
+  forever.
+
+The honest close: the limited assembly is 1.64x upwind's and the remaining gap is the scheme's own
+face-gather traffic, not brae's packaging of it. The row's target is not met and no lever in this row's
+list will meet it. What is still on the table for this case is elsewhere: the pressure phase is 6.35 of
+the iteration's 13.6 GPU ms (FP-12), and the leastSquares fits of the scalar fields are 1.51 in seven
+single-field launches that no site can group.

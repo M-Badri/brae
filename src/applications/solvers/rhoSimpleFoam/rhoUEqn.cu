@@ -337,13 +337,8 @@ void assembleUEqn(
             {
                 deviceGaussGradFused(dm, 3, Usrc, ubp, gx, gy, gz);
             }
-            if (in.gradULimitK > 0.0)
-            {
-                for (int k = 0; k < 3; ++k)
-                {
-                    deviceCellLimitGrad(dm, *Usrc[k], ub[k], gx[k], gy[k], gz[k], in.gradULimitK);
-                }
-            }
+            // FP-4: the three components limited in one launch, not three.
+            if (in.gradULimitK > 0.0) deviceCellLimitGradFused(dm, 3, Usrc, ubp, gx, gy, gz, in.gradULimitK);
             deviceDivLimitedVCoeffs(
                 dm,
                 *in.phiInt,
@@ -561,13 +556,7 @@ void assembleUEqn(
         {
             deviceGaussGradFused(dm, 3, U, ubp, gxc, gyc, gzc);
         }
-        if (in.gradULimitK > 0.0)
-        {
-            for (int k = 0; k < 3; ++k)
-            {
-                deviceCellLimitGrad(dm, *U[k], ub[k], gxc[k], gyc[k], gzc[k], in.gradULimitK);
-            }
-        }
+        if (in.gradULimitK > 0.0) deviceCellLimitGradFused(dm, 3, U, ubp, gxc, gyc, gzc, in.gradULimitK);   // FP-4
         if (in.snGradLimitCoeff > 0.0)
         {
             // `limited <k> corrected`. OF's limitedSnGrad takes mag() of the WHOLE snGrad and of the WHOLE
@@ -631,13 +620,7 @@ void assembleUEqn(
         }
         // The gradient the scheme NAMES, not grad(U)'s own -- see RhoMomentumInput::gradULULimitK.
         const scalar luK = (in.gradULULimitK >= 0.0) ? in.gradULULimitK : in.gradULimitK;
-        if (luK > 0.0)
-        {
-            for (int k = 0; k < 3; ++k)
-            {
-                deviceCellLimitGrad(dm, *Usrc[k], ub[k], gx[k], gy[k], gz[k], luK);
-            }
-        }
+        if (luK > 0.0) deviceCellLimitGradFused(dm, 3, Usrc, ubp, gx, gy, gz, luK);   // FP-4
         deviceLinearUpwindVCorr(dm, *in.phiInt, gx, gy, gz, Ux, Uy, Uz, cx, cy, cz);
         const DeviceBuffer<scalar>* cc[3] = {&cx, &cy, &cz};
         for (int k = 0; k < 3; ++k)

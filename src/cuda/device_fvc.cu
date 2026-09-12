@@ -961,6 +961,226 @@ void applyLimitKernel(int nC, const scalar* __restrict__ lim,
 } // namespace
 
 
+namespace {
+// THE SAME LIMITER, N FIELDS AT A TIME, IN ONE LAUNCH (FP-4).
+//
+// WHY. nsys on gasMixing/injectorPipe at 74,650 cells (--cuda-graph-trace=node, 20 iterations, after
+// FP-3): cellLimitGradKernel is 12 launches and 1.90 of the iteration's 13.73 GPU ms, and 9 of those
+// launches -- 1.41 ms -- are inside the momentum phase, which is 44% of it. They are the three velocity
+// components at three sites (the limitedLinearV weights, the corrected snGrad's gradient and
+// linearUpwindV's), each launch re-reading the WHOLE of the addressing and the face offsets -- owner,
+// nei, losort, losortStart, ownerStart, bndCellStart, bndPerm, bndIsEmpty, dOwn*, dNei*, dBnd* -- and
+// walking every face of every cell SIX times (three loops for the range, three for the limiter) to
+// carry one component. Reading that row once for three fields is the lever that worked on the Gauss
+// gradient (gradFusedKernel) and on the leastSquares fit (lsqGradFusedKernel).
+//
+// WHY IT IS BIT-IDENTICAL, per field. Fusing N independent fields is a loop interchange: the same faces
+// in the same order, the same expressions, each field's range, limiter and result in its own registers.
+// Nothing is reassociated; the shared operands (the offsets, the addressing) are read, never combined
+// across fields. min and max over the faces are per field, so no cross-field reduction exists to get
+// wrong. tests/test_cell_limit_grad_fused.cu holds every field to memcmp against deviceCellLimitGrad,
+// which keeps its own kernel for exactly that purpose.
+//
+// WHAT THIS ONE WAS WORTH, MEASURED (injectorPipe, 3 runs of 100 iterations and an nsys profile): 12
+// limiter launches per iteration became 8 and their GPU time 1.90 -> 1.74 ms, and the ITERATION did not
+// move outside run-to-run noise. The limiter's cost is its SIX face-loop passes over scattered
+// neighbour values, and fusing N fields removes no pass at all -- only the re-reads of the addressing.
+// Occupancy was ruled out too: 92 registers against the single-field kernel's 58, and capping it to 80
+// with __launch_bounds__(TPB, 3) moved 0.780 ms to 0.771. The pass count is what matters, which is what
+// the pass count is what matters -- and THAT WAS MEASURED TOO, and it is not the answer either. A
+// kernel that fused the gradient's three face passes with the limiter's range pass (they read the same
+// values at the same faces, so nine passes become six) was written, held bit-identical to
+// gradient-then-limiter, and measured on the same case: the two sites it served went 1.026 -> 0.999 ms
+// per iteration, 0.04 of the iteration's 13.7. The second pass was already L2-resident, so sharing it
+// bought the loop overhead and nothing else, and the kernel was reverted rather than kept as 200 lines
+// of duplicated arithmetic that must stay bit-identical to two others forever. What is left on this row
+// is the face-gather traffic itself, which is the scheme's own cost: on injectorPipe the momentum phase
+// is 4.1 ms/it limited, 2.7 with grad(U) unlimited and 2.5 with upwind divergence as well.
+template<int N>
+struct LimitFusedFields
+{
+    const scalar* U[N];
+    const scalar* Ubnd[N];
+    scalar* gx[N];
+    scalar* gy[N];
+    scalar* gz[N];
+};
+
+template<int N>
+__global__
+void cellLimitGradFusedKernel(
+    int nC,
+    scalar k,
+    const label* __restrict__ ownerStart,
+    const label* __restrict__ nei,
+    const label* __restrict__ losort,
+    const label* __restrict__ losortStart,
+    const label* __restrict__ owner,
+    const label* __restrict__ bndCellStart,
+    const label* __restrict__ bndPerm,
+    const label* __restrict__ bndIsEmpty,
+    const scalar* __restrict__ dOwnX, const scalar* __restrict__ dOwnY, const scalar* __restrict__ dOwnZ,
+    const scalar* __restrict__ dNeiX, const scalar* __restrict__ dNeiY, const scalar* __restrict__ dNeiZ,
+    const scalar* __restrict__ dBndX, const scalar* __restrict__ dBndY, const scalar* __restrict__ dBndZ,
+    LimitFusedFields<N> fld)
+{
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= nC) return;
+
+    scalar uc[N], maxD[N], minD[N];
+#pragma unroll
+    for (int i = 0; i < N; ++i)
+    {
+        uc[i] = fld.U[i][c];
+        maxD[i] = 0.0;               // incl. the cell itself (U[c]-U[c]=0)
+        minD[i] = 0.0;
+    }
+    for (int f = ownerStart[c]; f < ownerStart[c+1]; ++f)
+    {
+        const label n = nei[f];
+#pragma unroll
+        for (int i = 0; i < N; ++i)
+        {
+            const scalar d = fld.U[i][n] - uc[i];
+            maxD[i] = fmax(maxD[i],d);
+            minD[i] = fmin(minD[i],d);
+        }
+    }
+    for (int j = losortStart[c]; j < losortStart[c+1]; ++j)
+    {
+        const label o = owner[losort[j]];
+#pragma unroll
+        for (int i = 0; i < N; ++i)
+        {
+            const scalar d = fld.U[i][o] - uc[i];
+            maxD[i] = fmax(maxD[i],d);
+            minD[i] = fmin(minD[i],d);
+        }
+    }
+    // The empty-patch skip, for the reason cellLimitGradKernel spells out above: in the FACE loop below
+    // it is load-bearing, not tidy.
+    for (int j = bndCellStart[c]; j < bndCellStart[c+1]; ++j)
+    {
+        const int bk = bndPerm[j];
+        if (bndIsEmpty[bk]) continue;
+#pragma unroll
+        for (int i = 0; i < N; ++i)
+        {
+            const scalar d = fld.Ubnd[i][bk] - uc[i];
+            maxD[i] = fmax(maxD[i],d);
+            minD[i] = fmin(minD[i],d);
+        }
+    }
+    if (k < 1.0)   // OF k<1 widening
+    {
+#pragma unroll
+        for (int i = 0; i < N; ++i)
+        {
+            const scalar wdn = (1.0/k - 1.0)*(maxD[i] - minD[i]);
+            maxD[i] += wdn;
+            minD[i] -= wdn;
+        }
+    }
+    scalar gcx[N], gcy[N], gcz[N], lim[N];
+#pragma unroll
+    for (int i = 0; i < N; ++i)
+    {
+        gcx[i] = fld.gx[i][c];
+        gcy[i] = fld.gy[i][c];
+        gcz[i] = fld.gz[i][c];
+        lim[i] = 1.0;
+    }
+    for (int f = ownerStart[c]; f < ownerStart[c+1]; ++f)
+    {
+        const scalar ax = dOwnX[f], ay = dOwnY[f], az = dOwnZ[f];
+#pragma unroll
+        for (int i = 0; i < N; ++i)
+            lim[i] = fmin(lim[i], limFace(maxD[i], minD[i], ax*gcx[i] + ay*gcy[i] + az*gcz[i]));
+    }
+    for (int j = losortStart[c]; j < losortStart[c+1]; ++j)
+    {
+        const int f = losort[j];
+        const scalar ax = dNeiX[f], ay = dNeiY[f], az = dNeiZ[f];
+#pragma unroll
+        for (int i = 0; i < N; ++i)
+            lim[i] = fmin(lim[i], limFace(maxD[i], minD[i], ax*gcx[i] + ay*gcy[i] + az*gcz[i]));
+    }
+    for (int j = bndCellStart[c]; j < bndCellStart[c+1]; ++j)
+    {
+        const int bk = bndPerm[j];
+        if (bndIsEmpty[bk]) continue;
+        const scalar ax = dBndX[bk], ay = dBndY[bk], az = dBndZ[bk];
+#pragma unroll
+        for (int i = 0; i < N; ++i)
+            lim[i] = fmin(lim[i], limFace(maxD[i], minD[i], ax*gcx[i] + ay*gcy[i] + az*gcz[i]));
+    }
+#pragma unroll
+    for (int i = 0; i < N; ++i)
+    {
+        fld.gx[i][c] = gcx[i]*lim[i];
+        fld.gy[i][c] = gcy[i]*lim[i];
+        fld.gz[i][c] = gcz[i]*lim[i];
+    }
+}
+
+template<int N>
+void launchLimitFused(
+    const DeviceMesh& dm,
+    scalar k,
+    const DeviceBuffer<scalar>* const* U,
+    const DeviceBuffer<scalar>* const* Ubnd,
+    DeviceBuffer<scalar>* gx,
+    DeviceBuffer<scalar>* gy,
+    DeviceBuffer<scalar>* gz)
+{
+    LimitFusedFields<N> fld;
+    for (int i = 0; i < N; ++i)
+    {
+        fld.U[i]    = U[i]->data();
+        fld.Ubnd[i] = Ubnd[i]->data();
+        fld.gx[i]   = gx[i].data();
+        fld.gy[i]   = gy[i].data();
+        fld.gz[i]   = gz[i].data();
+    }
+    cellLimitGradFusedKernel<N><<<nBlocks(dm.nCells), TPB>>>(dm.nCells, k,
+        dm.ownerStart.data(), dm.nei.data(), dm.losort.data(), dm.losortStart.data(), dm.owner.data(),
+        dm.bndCellStart.data(), dm.bndPerm.data(), dm.bndIsEmpty.data(),
+        dm.dOwnX.data(), dm.dOwnY.data(), dm.dOwnZ.data(), dm.dNeiX.data(), dm.dNeiY.data(), dm.dNeiZ.data(),
+        dm.dBndX.data(), dm.dBndY.data(), dm.dBndZ.data(), fld);
+    cudaCheck(cudaGetLastError(), "cellLimitGradFused");
+}
+} // namespace
+
+
+// The N-field form of the limiter below, for the callers that limit the three velocity components with
+// one coefficient. Coupled interfaces are NOT handled here (they need the five-phase scatter, which is
+// what deviceCellLimitGrad still does per field), so a caller with interfaces keeps the loop.
+void deviceCellLimitGradFused(
+    const DeviceMesh& dm,
+    int n,
+    const DeviceBuffer<scalar>* const* U,
+    const DeviceBuffer<scalar>* const* Ubnd,
+    DeviceBuffer<scalar>* gx,
+    DeviceBuffer<scalar>* gy,
+    DeviceBuffer<scalar>* gz,
+    scalar k)
+{
+    // Refuse rather than truncate, as deviceGaussGradFused does: silently limiting the first three of
+    // four fields is the class of quiet substitution this project keeps finding.
+    if (n < 1 || n > 3)
+    {
+        throw std::runtime_error("brae: deviceCellLimitGradFused takes 1, 2 or 3 fields, asked for "
+                                 + std::to_string(n) + ".");
+    }
+    switch (n)
+    {
+        case 1:  launchLimitFused<1>(dm, k, U, Ubnd, gx, gy, gz); break;
+        case 2:  launchLimitFused<2>(dm, k, U, Ubnd, gx, gy, gz); break;
+        default: launchLimitFused<3>(dm, k, U, Ubnd, gx, gy, gz); break;
+    }
+}
+
+
 // cellLimited Gauss linear <k> (OF cellLimitedGrad<vector,minmod>), applied to ONE component's gradient: scale grad
 // so the reconstructed face value C[c] + (Cf-C).grad stays within the cell's face-neighbour min/max. Per-component
 // (caller loops the 3 U components). k=1 = full limiting (motorBike); k<1 widens the bounds (less limiting).
