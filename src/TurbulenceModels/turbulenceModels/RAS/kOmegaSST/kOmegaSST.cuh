@@ -34,6 +34,7 @@
 #include "device_kepsilon.cuh"      // DeviceWallData, deviceGradU, deviceGByNuFromGradU
 #include "device_komega_sst.cuh"    // the shared SST physics kernels
 #include "device_dilu.cuh"
+#include "device_colour_gauss_seidel.cuh"   // DeviceCellColouring (FP-1)
 #include "komega_sst_coeffs.cuh"
 #include "pEqn.cuh"
 #include <string>
@@ -141,6 +142,9 @@ struct KOmegaSSTInput
     int    polyDeg = 1;
     bool   gsK = false, gsOmega = false, gsSymmetric = true;
     int    nSweepsKE = 1;
+    // FP-1: sweep the honoured smoothSolver in COLOUR order over `colouring` (SolveControls::gsColour).
+    bool   gsColour = false;
+    const DeviceCellColouring* colouring = nullptr;
 
     // fvOptions constraints, resolved to per-cell masks by the caller.
     const DeviceBuffer<label>*  fvoOmegaMask = nullptr;

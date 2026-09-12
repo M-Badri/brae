@@ -103,6 +103,8 @@ turbulence::SolveControls solveOf(const KOmegaSSTInput& in)
     sv.gsSymmetric = in.gsSymmetric;
     sv.precon      = in.precon;
     sv.polyDeg     = in.polyDeg;
+    sv.gsColour    = in.gsColour;
+    sv.colouring   = in.colouring;
     return sv;
 }
 

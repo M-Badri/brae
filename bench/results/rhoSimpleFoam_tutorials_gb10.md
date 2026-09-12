@@ -137,3 +137,62 @@ gradients, `Gauss limitedLinear 1` on k and epsilon, the Euler ddt, and the host
 energy phase outside its solve (squareBendLiq and NoNewtonian: the he-to-T Newton inversion per cell,
 the live energy boundary, the expression walls). None of those modules has had a speed measurement of
 its own yet; this table is where the digging starts.
+
+## FP-1: the scalar smoothSolver entries on the colour engine (2026-09-12)
+
+The first row of `../rhoSimpleFoam/FASTPATH.md`. Where a case names `smoothSolver` with a
+GaussSeidel-family smoother on e/h, k, epsilon or omega, the CUDA arm now sweeps that system in COLOUR
+order through the momentum engine with one component (deviceColourGaussSeidelFused, nComp 1), under
+the entry's own stop rule, instead of OpenFOAM's index order on one CPU thread. The order is announced
+per field (`solvers/e smoother: case asks 'symGaussSeidel' in OpenFOAM's index order; brae sweeps in
+COLOUR order ...`) and `BRAE_GS_ORDER=ofOrder` restores the previous path; unset, the switch follows
+`BRAE_U_SOLVER`, so every gate that pins `ofOrder` for the momentum's exact iterate pins the scalars'
+as well. Same binary otherwise, same cases and staging as the tables above, `BRAE_PHASE_TIME=1`, 100
+iterations, three runs each; the "before" column is three runs of the same binary the day before the
+change (a5266d0).
+
+| tutorial                     | phase        | before, 3 runs (ms/it) | after, 3 runs (ms/it) | opt-out (BRAE_GS_ORDER=ofOrder) |
+|------------------------------|--------------|-----------------------:|----------------------:|--------------------------------:|
+| squareBendLiq                | he solve     |                    6.1 |             1.3 / 1.3 / 1.3 |                       6.8 |
+| squareBendLiq                | EEqn         |         9.8 / 9.6 / 9.5 |             6.5 / 5.7 / 6.6 |                       9.9 |
+| squareBendLiq                | turbulence   |      13.3 / 14.6 / 13.9 |             3.9 / 3.9 / 4.1 |                      14.7 |
+| squareBendLiq                | four phases  |      33.1 / 34.0 / 33.4 |          21.3 / 20.0 / 21.6 |                      34.6 |
+| injectorPipe                 | turbulence   |         9.6 / 9.6 / 9.6 |             4.5 / 4.4 / 4.6 |                       9.9 |
+| injectorPipe                 | four phases  |      23.1 / 23.1 / 23.4 |          18.8 / 18.5 / 18.9 |                      23.6 |
+| angledDuctExplicitFixedCoeff | he solve     |                    1.0 |             0.2 / 0.2 / 0.2 |                         - |
+| angledDuctExplicitFixedCoeff | four phases  |         8.4 / 9.1 / 9.0 |             7.7 / 8.0 / 7.4 |                         - |
+| squareBendLiqNoNewtonian     | he solve     |                    5.0 |             1.3 / 1.4 / 1.3 |                         - |
+| squareBendLiqNoNewtonian     | four phases  |      18.4 / 18.1 / 18.2 |          15.3 / 15.5 / 15.3 |                         - |
+
+squareBendLiq's iteration drops from 33 to 21 ms, and its energy solve (1.3) and turbulence block
+(3.9-4.1) now sit where squareBend's device BiCGStab path puts them on the same mesh (1.0 and 4.3) --
+the row's target (he solve <= 1.5, turbulence <= 6) is met. What squareBendLiq still carries over
+squareBend is the energy phase outside its solve (5.2 against 1.3 ms/it: the liquid he-to-T inversion,
+the live energy boundary and the expression walls, FP-6 and FP-7). injectorPipe's turbulence halves
+and its iteration goes from 23 to 19 ms; the two smaller cases lose their host-smoother energy solve
+(1.0 and 5.0 ms/it down to 0.2 and 1.3).
+
+Correctness, all on the same day: `tests/scalar_colour_gs_vs_openfoam.sh` on rhoKE at 1e-14 --
+EXACT 1.27e-12, REF (ofOrder) 2.28e-12, DEFAULT 1.96e-12 against bound 1e-9, the relTol-0.1 CONTROL
+1.3e-02 and the maxIter-1 FAIL-PROOF 1.4e-01 above it, both of OpenFOAM's smoothers exercised
+(symGaussSeidel on h, GaussSeidel on the pair); `test_colour_gs_fused` arm (m), one component
+bit-identical to the fused solve's component 0; `rho_smoothsolver_vs_openfoam` (angledDuct as shipped,
+30 iterations at the tutorial's own relTol), the default arm now e 1.04x, k 1.03x, epsilon 1.28x of
+OpenFOAM's residuals against 1.00x / 1.11x / 1.17x when only U took the colour sweep, inside the bounds
+it already carried; `u_colour_gs_vs_openfoam`, `rho_patch_expression_vs_openfoam` (squareBendLiq's
+walls at 1e-12), `rho_gasmixing_vs_openfoam` and `rho_tutorials_vs_openfoam` unchanged at their bounds.
+
+Whole-run wall under the new default, the same staging and the same OpenFOAM numbers as the first
+table (OpenFOAM's side did not change):
+
+| tutorial                     | brae 100 it, before -> after | brae 200 it, before -> after | brae ms/it | OF-20c ms/it | per iteration, brae is (was) |
+|------------------------------|-----------------------------:|-----------------------------:|-----------:|-------------:|-----------------------------:|
+| angledDuctExplicitFixedCoeff |                 1.4 -> 1.2 s |                 2.3 -> 1.9 s |          7 |            7 |                 1.0x (0.78x) |
+| squareBendLiq                |                 4.5 -> 3.3 s |                 7.8 -> 5.0 s |         17 |           23 |                 1.35x (0.70x) |
+| squareBendLiqNoNewtonian     |                 2.6 -> 2.3 s |                 4.3 -> 3.8 s |         15 |           22 |                 1.47x (1.29x) |
+| gasMixing/injectorPipe       |                 3.1 -> 2.6 s |                 5.2 -> 4.5 s |         19 |           20 |                 1.05x (0.95x) |
+
+The slowest tutorial relative to 20 cores, squareBendLiq, goes from 0.70x to 1.35x per iteration; the
+two smoothSolver cases that were behind are at parity or ahead. squareBend and the aerofoil name no
+smoothSolver on their scalars and are untouched.
+

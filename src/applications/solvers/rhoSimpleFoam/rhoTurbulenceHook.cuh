@@ -32,6 +32,7 @@
 #include "device_buffer.cuh"
 #include "device_boundary.cuh"
 #include "device_mesh.cuh"
+#include "device_colour_gauss_seidel.cuh"   // DeviceCellColouring (FP-1)
 #include "kepsilon_coeffs.cuh"
 #include "kEpsilon.cuh"
 #include "rhoCreateFields.cuh"
@@ -93,6 +94,10 @@ struct TurbulenceHookOptions
     // smoother, per field, with one smoother variant and one nSweeps for the pair.
     bool           gsK = false, gsEps = false, gsSymmetric = true;
     int            nSweepsKE = 1;
+    // FP-1: the honoured smoothSolver swept in COLOUR order over the driver's cell colouring (the same
+    // one the momentum solve uses); announced per field by the driver, opt-out BRAE_GS_ORDER=ofOrder.
+    bool           gsColour = false;
+    const DeviceCellColouring* colouring = nullptr;
     // fvOptions.constrain(kEqn)/(epsEqn) -- kEpsilon.C calls it on both. A scalarFixedValueConstraint
     // naming k or epsilon pins those cells with fvMatrix::setValues, which is NOT the same as writing
     // the field afterwards: setValues also removes the coupling from the neighbours' equations.

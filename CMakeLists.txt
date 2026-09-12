@@ -2535,6 +2535,14 @@ add_test(NAME rho_patch_expression_vs_openfoam
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_patch_expression_vs_openfoam.sh)
 set_tests_properties(rho_patch_expression_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
 
+# FP-1 (bench/rhoSimpleFoam/FASTPATH.md): the colour-order smoothSolver on the energy field and the
+# turbulence pair, the scalar counterpart of u_colour_gs_vs_openfoam. EXACT where the solves converge,
+# DIFFERENT where they do not (the control), ANNOUNCED per field; the opt-out (BRAE_GS_ORDER=ofOrder)
+# runs OpenFOAM's own order and passes the same bound.
+add_test(NAME scalar_colour_gs_vs_openfoam
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/scalar_colour_gs_vs_openfoam.sh)
+set_tests_properties(scalar_colour_gs_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200)
+
 # rhoSimpleFoam's UEqn.H against OpenFOAM's own assembled momentum matrix (tools/dumpPEqn stage harness:
 # rAU, internalCoeffs, boundaryCoeffs). OpenFOAM's muEff is injected so this measures the ASSEMBLY and not
 # the unported compressible turbulence closure. Carries the control that distinguishes the compressible

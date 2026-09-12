@@ -1038,7 +1038,22 @@ Residuals rhoSimpleStep(
         // keeps BiCGStab and is announced. squareBend and angledDuct both name a smoothSolver here.
         DeviceSolverPerf perf;
         solveMarkBegin();
-        if (in.heSymGaussSeidel)
+        if (in.heColourGaussSeidel)
+        {
+            // FP-1: the case's GaussSeidel-family smoothSolver on the energy field, swept in COLOUR order
+            // by the momentum engine with one component (RhoStepInput::heColourGaussSeidel). The driver
+            // announced the order; this branch only refuses to run without the colouring it was promised.
+            if (!in.uColouring || !in.uColouring->valid)
+                throw std::runtime_error(
+                    "brae rhoSimpleFoam (mirror): the colour-order energy smoothSolver was selected but "
+                    "RhoStepInput::uColouring is null or invalid; refusing rather than running a solver "
+                    "the notice did not name");
+            GSFusedComponent one;
+            one.A = &A; one.b = &b; one.psi = &f.he; one.normFactor = 1.0; one.dNormFactor = dnf.data();
+            deviceColourGaussSeidelFused(1, &one, *in.uColouring, in.tolHe, in.relTolHe, in.maxIterHe,
+                                         in.minIterHe, in.nSweepsHe, in.heGaussSeidelSymmetric, &perf);
+        }
+        else if (in.heSymGaussSeidel)
             deviceSymGaussSeidel(A, b, f.he, dnf.data(), in.tolHe, in.relTolHe, in.maxIterHe, &perf, in.minIterHe,
                                  in.nSweepsHe, in.heGaussSeidelSymmetric);
         else

@@ -258,6 +258,14 @@ struct RhoStepInput
     // driver and lives in RhoSolverWorkspace::uColouring beside w.dilu; null or !valid with the flag
     // set is refused, never replaced by the BiCGStab the notice just said is not running.
     const DeviceCellColouring* uColouring = nullptr;
+    // FP-1 (bench/rhoSimpleFoam/FASTPATH.md): the SAME colour-order sweep on the energy field when its
+    // entry names a GaussSeidel-family smoothSolver -- one component through deviceColourGaussSeidelFused
+    // over uColouring (a property of the mesh, so one colouring serves every field). Mutually exclusive
+    // with heSymGaussSeidel, as the U pair is; the driver announces the order per field and
+    // BRAE_GS_ORDER=ofOrder (or BRAE_U_SOLVER=ofOrder, which it follows when unset) opts out. Measured
+    // before it: squareBendLiq's e solve 6.1 ms/it on the CPU smoother against squareBend's 1.0 for a
+    // device BiCGStab on the same 112k mesh.
+    bool   heColourGaussSeidel = false;
     bool   captureVcycle = true;
     int    pcgCheckEvery = 1;
     // Reuse the AMG hierarchy STRUCTURE across runs. The agglomeration is the build cost and depends only

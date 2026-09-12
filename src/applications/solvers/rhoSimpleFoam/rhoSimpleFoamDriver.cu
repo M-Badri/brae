@@ -604,6 +604,36 @@ int runMirrorCuda(const std::string& caseDir)
                 "the case's own Krylov solver otherwise).");
         }
     }
+    // FP-1 (bench/rhoSimpleFoam/FASTPATH.md): the same colour-order sweep on the ENERGY field and the
+    // transported turbulence scalars wherever the case names a GaussSeidel-family smoothSolver there.
+    // Before it, those entries ran OpenFOAM's own index-order sweep -- on ONE CPU thread by default
+    // (device_amg_gauss_seidel.cu hostSmootherSelected) -- and on squareBendLiq's 112k cells the e solve
+    // cost 6.1 ms per iteration and the turbulence block 13.3, against 1.0 and 4.3 for squareBend's
+    // device BiCGStab on the same mesh. The engine takes one component (deviceColourGaussSeidelFused,
+    // nComp 1; tests/test_colour_gs_fused arm (m)); the stop rule is the entry's; the iterate after n
+    // sweeps is not OpenFOAM's, and each field is announced below. BRAE_GS_ORDER=colour|ofOrder selects
+    // it for the scalars; unset, it FOLLOWS BRAE_U_SOLVER, so a gate that pins ofOrder for the momentum's
+    // exact iterate pins the scalars' as well.
+    bool scalarColourGS = uColourGS;
+    if (const char* e = std::getenv("BRAE_GS_ORDER"))
+    {
+        const std::string sel(e);
+        if (sel == "colour")
+        {
+            scalarColourGS = true;
+        }
+        else if (sel == "ofOrder")
+        {
+            scalarColourGS = false;
+        }
+        else if (!sel.empty())
+        {
+            throw std::runtime_error(
+                "brae rhoSimpleFoam (mirror): BRAE_GS_ORDER='" + sel + "' names no sweep order this driver "
+                "runs on the energy and turbulence smoothSolver entries. Accepted values: `colour` (the "
+                "multicolour sweep, the default) or `ofOrder` (OpenFOAM's own index order).");
+        }
+    }
 
     // The case's own linear-solver tolerances, for the same reason the host driver reads them: a gate
     // pins them so the linear solve is out of the comparison, a SOLVER runs what the case asks for.
@@ -826,9 +856,11 @@ int runMirrorCuda(const std::string& caseDir)
         }
     }
 
-    if (uColourGS)
+    const bool scalarColourWanted = scalarColourGS && (gsHe || gsK || gsEps);
+    if (uColourGS || scalarColourWanted)
     {
-        // The colouring the colour-order sweep visits the cells in, once per mesh like w.dilu.
+        // The colouring the colour-order sweep visits the cells in, once per mesh like w.dilu. A
+        // property of the mesh, so the momentum, the energy and the turbulence pair share it (FP-1).
         // PrimitiveMesh::owner() spans the boundary faces as well while neighbour() stops at the
         // internal ones (primitive_mesh.cuh:99, and the slice buildDeviceDilu takes for the same
         // reason), so owner is cut to neighbour().size() before the two are paired face by face.
@@ -845,6 +877,9 @@ int runMirrorCuda(const std::string& caseDir)
                 "brae rhoSimpleFoam (mirror): the multicolour Gauss-Seidel momentum solve (the default) "
                 "needs a cell colouring and it could not be built; refusing rather than running the solver "
                 "the notice denied. BRAE_U_SOLVER=ofOrder runs OpenFOAM's own order instead.");
+    }
+    if (uColourGS)
+    {
         gin.uColourGaussSeidel = true;
         // Never both: the step branches `if (uSymGaussSeidel) ... else if (uColourGaussSeidel)`, and
         // clearing the first here is what keeps it from shadowing the second on a smoothSolver entry.
@@ -863,6 +898,40 @@ int runMirrorCuda(const std::string& caseDir)
                     sizes.c_str(),
                     gin.uGaussSeidelSymmetric ? "symGaussSeidel (ascending then descending)"
                                               : "GaussSeidel (ascending only)");
+    }
+
+    if (scalarColourWanted)
+    {
+        // FP-1: the energy field and the turbulence pair take the colour sweep where their entries name a
+        // GaussSeidel-family smoothSolver. The step's he branch and the closures' solveScalarEqn refuse to
+        // run without the colouring, so the flag and the pointer are set together.
+        gin.uColouring = &w.uColouring;
+        if (gsHe)
+        {
+            gin.heColourGaussSeidel = true;
+            gin.heSymGaussSeidel    = false;   // never both: the step branches colour first
+        }
+        const std::string secondName = (hf.rasModel == "kOmegaSST") ? "omega" : "epsilon";
+        std::string fields;
+        auto announce = [&](const std::string& f)
+        {
+            const FoamDict* e = solversDict ? solversDict->subDict(f) : nullptr;
+            const std::string smoo = e ? e->wordOr("smoother", "") : "";
+            noticeApproximated("solvers/" + f + " smoother",
+                               "case asks '" + smoo + "' in OpenFOAM's index order; brae sweeps in COLOUR "
+                               "order -- same stop rule, a different iterate after n sweeps (the momentum's "
+                               "tests/gs_ladder measurement: 1.36x/2.76x/6.88x behind after 1/5/10 sweeps on "
+                               "T3A). FP-1: on squareBendLiq's 112k cells the e solve reads 6.1 ms per iteration "
+                               "on the CPU smoother this replaces. BRAE_GS_ORDER=ofOrder runs OpenFOAM's own "
+                               "order instead");
+            fields += (fields.empty() ? "" : ", ") + f;
+        };
+        if (gsHe)  announce(hf.heName);
+        if (gsK)   announce("k");
+        if (gsEps) announce(secondName);
+        std::printf("  %s: multicolour Gauss-Seidel smoothSolver, %d colours, the momentum colouring, "
+                    "tolerance/relTol/maxIter/minIter/nSweeps from each entry\n",
+                    fields.c_str(), w.uColouring.nColours);
     }
 
     // The name on the OpenFOAM-format `Solving for Ux` line (of_residual_log.cuh, BRAE_OF_LOG=1): what
@@ -891,6 +960,8 @@ int runMirrorCuda(const std::string& caseDir)
         turbOpt.precon = (diluKE && w.dilu.valid) ? &w.dilu : nullptr;
         turbOpt.polyDegKE = polyDegKE;
         turbOpt.gsK = gsK;  turbOpt.gsEps = gsEps;  turbOpt.gsSymmetric = gsKESym;  turbOpt.nSweepsKE = nSweepsKE;
+        turbOpt.gsColour  = scalarColourWanted && (gsK || gsEps);   // FP-1, announced above
+        turbOpt.colouring = scalarColourWanted ? &w.uColouring : nullptr;
 
         gin.correct = [&]()
         {

@@ -163,6 +163,7 @@ void correctTurbulence(
     kin.relaxEquationEps = opt.relaxEquationEps; kin.relaxEps = opt.relaxEps;
     kin.tol = opt.tol; kin.relTol = opt.relTol; kin.maxIter = opt.maxIter; kin.minIter = opt.minIter;
     kin.gsK = opt.gsK; kin.gsEps = opt.gsEps; kin.gsSymmetric = opt.gsSymmetric; kin.nSweepsKE = opt.nSweepsKE;
+    kin.gsColour = opt.gsColour; kin.colouring = opt.colouring;
     kin.precon     = opt.precon;
     kin.polyDeg    = opt.polyDegKE;
     kin.fvoKMask   = opt.fvoKMask;    kin.fvoKVal   = opt.fvoKVal;
@@ -205,6 +206,7 @@ void correctTurbulence(
         sstIn.precon = kin.precon;  sstIn.polyDeg = kin.polyDeg;
         sstIn.gsK = kin.gsK;  sstIn.gsOmega = kin.gsEps;  sstIn.gsSymmetric = kin.gsSymmetric;
         sstIn.nSweepsKE = kin.nSweepsKE;
+        sstIn.gsColour = kin.gsColour;  sstIn.colouring = kin.colouring;
         sstIn.fvoKMask = kin.fvoKMask;  sstIn.fvoKVal = kin.fvoKVal;
         sstIn.fvoOmegaMask = kin.fvoEpsMask;  sstIn.fvoOmegaVal = kin.fvoEpsVal;
         sstIn.co  = opt.sstCo;

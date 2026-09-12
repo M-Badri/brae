@@ -711,6 +711,28 @@ int main()
     check(rf.dev.perf[0].nIterations > 0 && rf.dev.perf[1].nIterations > 0 && rf.dev.perf[0].finalResidual < pf.tol,
           "(f) components 0 and 1 swept to tol beside it");
 
+    // (m) ONE COMPONENT (FP-1, bench/rhoSimpleFoam/FASTPATH.md): the energy field and the transported
+    // turbulence scalars go through this engine with nComp 1. The components of a fused solve are
+    // independent (each its own diagonal, source, normFactor, residual, sweep count and stop), so
+    // component 0 solved ALONE must reproduce component 0 of the three-component solve (a) to the bit
+    // -- the same sweeps, the same report -- or the scalar path is a different solver.
+    {
+        DeviceSystem s1;
+        fillDeviceSystem(s1, dm, U, L, std3, nfStd, pa.nfOnDevice);
+        DeviceSolverPerf p1;
+        deviceColourGaussSeidelFused(1, s1.comps, col, pa.tol, pa.relTol, pa.maxIter, pa.minIter, pa.nSweeps, pa.symmetric, &p1);
+        std::vector<scalar> psi1;
+        s1.P[0].copyTo(psi1);
+        check(psi1 == ra.dev.psi[0], "(m) nComp 1: component 0's psi is bit-identical to the fused solve's component 0");
+        check(p1.initialResidual == ra.dev.perf[0].initialResidual && p1.finalResidual == ra.dev.perf[0].finalResidual
+              && p1.nIterations == ra.dev.perf[0].nIterations,
+              "(m) nComp 1: the same initial residual, final residual and sweep count as the fused component 0");
+        // ...and it is a solve, not a copy: the other two components' systems were never touched.
+        std::vector<scalar> psi1b;
+        s1.P[1].copyTo(psi1b);
+        check(psi1b == std3[1].psi0, "(m) nComp 1: component 1's psi is untouched (the solve ran on component 0 only)");
+    }
+
     // (g) CONTROL: OpenFOAM's natural-order GaussSeidelSmoother under (a)'s rule leaves a different
     // iterate. If it did not, the colour order would be a harmless reordering and the announce that
     // names it a substitution would be wrong; it is not harmless, and this measures by how much.

@@ -102,6 +102,16 @@ grep -q "solvers/U smoother: case asks 'GaussSeidel' in OpenFOAM's index order; 
 grep -q "solvers/U smoother:" "$W/hon/run.log" \
     && say "CONTROL  ...and the ofOrder run does not (it runs the case's own order)" FAIL \
     || say "CONTROL  ...and the ofOrder run does not (it runs the case's own order)" ok
+# ...and, since FP-1 (2026-09-12), the same colour sweep on e, k and epsilon: the default announces each,
+# the pinned run (BRAE_U_SOLVER=ofOrder, which BRAE_GS_ORDER follows when unset) announces none.
+for f in e k epsilon; do
+    grep -q "solvers/$f smoother: case asks '[a-zA-Z]*GaussSeidel' in OpenFOAM's index order; brae sweeps in COLOUR order" "$W/def/run.log" \
+        && say "ARM 4  the default run announces the COLOUR-order sweep on $f" ok \
+        || say "ARM 4  the default run announces the COLOUR-order sweep on $f" FAIL
+    grep -q "solvers/$f smoother:" "$W/hon/run.log" \
+        && say "CONTROL  ...and the ofOrder run does not, on $f" FAIL \
+        || say "CONTROL  ...and the ofOrder run does not, on $f" ok
+done
 
 # ARM 3 / CONTROL -- the trajectory against OpenFOAM
 python3 - "$W" <<'PY' || fail=1
@@ -142,11 +152,13 @@ for f in ('U', 'e', 'k', 'epsilon'):
         print("  CONTROL  %-8s substituted %.4e (%.2fx OpenFOAM; must be >= 2.0x)                   %s"
               % (f, c, rc, "ok" if okc else "FAIL"))
         if not okc: bad = 1
-# ARM 4 -- the same trajectory under the DEFAULT momentum solver, at bounds measured for IT. The colour
-# sweep reaches the same relTol as OpenFOAM's index-order one and leaves a different iterate, so U sits
-# further out (measured 2.15x) while the three fields it does not touch stay where ARM 3 has them
-# (measured e 1.00x, k 1.11x, epsilon 1.17x). The tight momentum bound stays on ARM 3, which is the arm
-# that detects an assembly or boundary defect; this one exists so the default is covered at all.
+# ARM 4 -- the same trajectory under the DEFAULT solvers, at bounds measured for IT. The colour sweep
+# reaches the same relTol as OpenFOAM's index-order one and leaves a different iterate, so U sits
+# further out (measured 2.15x before FP-1, 2.18x after). Since FP-1 (2026-09-12) e, k and epsilon take
+# the colour sweep as well: measured 1.04x, 1.03x and 1.28x against 1.00x, 1.11x and 1.17x when only U
+# did -- inside the bounds the arm already carried, which are therefore unchanged. The tight bounds stay
+# on ARM 3, which is the arm that detects an assembly or boundary defect; this one exists so the default
+# is covered at all.
 DEF = {'U': (0.6, 2.8), 'e': (0.6, 1.6), 'k': (0.6, 1.6), 'epsilon': (0.6, 1.6)}
 for f in ('U', 'e', 'k', 'epsilon'):
     o, d = ofv[f], dft[IT].get(f)

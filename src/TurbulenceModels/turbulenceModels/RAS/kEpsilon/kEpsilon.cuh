@@ -60,6 +60,7 @@
 #include "device_boundary.cuh"
 #include "device_kepsilon.cuh"    // DeviceWallData, deviceGradU, deviceGByNuFromGradU, deviceWallEpsG0
 #include "device_dilu.cuh"        // the case's DILU preconditioner for the k and epsilon solves
+#include "device_colour_gauss_seidel.cuh"   // DeviceCellColouring: the colour-order smoothSolver (FP-1)
 #include "kepsilon_coeffs.cuh"
 #include "pEqn.cuh"               // PressureMatrix -- the assembled scalar object, shared not redefined
 #include <string>
@@ -133,6 +134,10 @@ struct KEpsilonInput
     // variant and ONE nSweeps for the pair, which linear_solver_setup refuses to resolve when they differ.
     bool   gsK = false, gsEps = false, gsSymmetric = true;
     int    nSweepsKE = 1;
+    // FP-1: sweep the honoured smoothSolver in COLOUR order over `colouring` (turbulence_transport.cuh
+    // SolveControls::gsColour); the driver announces the order per field.
+    bool   gsColour = false;
+    const DeviceCellColouring* colouring = nullptr;
     bool   boundedK   = false;
     bool   boundedEps = false;    // separate fvSchemes entries; the reference carries ONE bool for both,
                                   // so a case that bounds one and not the other is refused here rather

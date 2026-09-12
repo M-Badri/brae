@@ -919,6 +919,8 @@ void finishAndSolve(
     sv.gsSymmetric = in.gsSymmetric;
     sv.precon      = in.precon;
     sv.polyDeg     = in.polyDeg;
+    sv.gsColour    = in.gsColour;
+    sv.colouring   = in.colouring;
     turbulence::solveScalarEqn(M, field, dm, relaxEquation, alpha, fvoMask, fvoVal, wallMask, wallVal,
                                sv, residualOut, dumpPrefix, gs);
 }

@@ -236,7 +236,21 @@ void solveScalarEqn(
     // The solver the case asked for (item 58). The view above is internal-face only, which is what the
     // level-scheduled sweep needs; there is no interface to drop silently.
     DeviceSolverPerf perf;
-    if (gs)
+    if (gs && sv.gsColour)
+    {
+        // FP-1: the case's smoothSolver swept in COLOUR order, one component through the momentum engine.
+        // The driver announced the order; refuse rather than run something else without the colouring.
+        if (!sv.colouring || !sv.colouring->valid)
+            throw std::runtime_error(
+                "brae turbulence: the colour-order smoothSolver was selected for a transported scalar but "
+                "SolveControls::colouring is null or invalid; refusing rather than running a solver the "
+                "notice did not name");
+        GSFusedComponent one;
+        one.A = &A; one.b = &b; one.psi = &field; one.normFactor = 1.0; one.dNormFactor = dnf.data();
+        deviceColourGaussSeidelFused(1, &one, *sv.colouring, sv.tol, sv.relTol, sv.maxIter, sv.minIter,
+                                     sv.nSweeps, sv.gsSymmetric, &perf);
+    }
+    else if (gs)
         deviceSymGaussSeidel(A, b, field, dnf.data(), sv.tol, sv.relTol, sv.maxIter, &perf, sv.minIter,
                              sv.nSweeps, sv.gsSymmetric);
     else

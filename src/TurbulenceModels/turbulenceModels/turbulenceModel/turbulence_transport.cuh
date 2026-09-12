@@ -21,6 +21,7 @@
 #include "device_boundary.cuh"
 #include <string>
 #include "device_dilu.cuh"    // DeviceDilu -- the case's preconditioner for these solves
+#include "device_colour_gauss_seidel.cuh"   // DeviceCellColouring -- the colour-order smoothSolver (FP-1)
 #include "pEqn.cuh"               // PressureMatrix -- the assembled scalar object, shared not redefined
 
 namespace brae {
@@ -91,6 +92,14 @@ struct SolveControls
     // the Neumann series' degree that policy derived from the case's relaxation factor.
     const DeviceDilu* precon = nullptr;
     int    polyDeg  = 0;
+    // FP-1 (bench/rhoSimpleFoam/FASTPATH.md): when the case's smoothSolver is honoured (gs), sweep it in
+    // COLOUR order through deviceColourGaussSeidelFused with one component over `colouring` -- the
+    // momentum engine, the same stop rule, a different iterate after n sweeps, which the driver
+    // announces per field. Off, or with no colouring, the sweep is OpenFOAM's own index order
+    // (deviceSymGaussSeidel: the CPU smoother by default, the level-scheduled device loop under
+    // BRAE_GS_HOST_SMOOTHER=0).
+    bool   gsColour = false;
+    const DeviceCellColouring* colouring = nullptr;
 };
 
 // relax -> constrain -> wall setValues -> solve, writing the initial residual out. `wallMask`/`wallVal`
