@@ -877,164 +877,92 @@ run instead of at a field dump. Adding it needs min/max/mean reductions the shar
 
 ## The size sweep after the porting campaign (2026-09-12)
 
-Machine: GB10 (20 Grace cores, one Blackwell GPU, unified memory), OpenFOAM v2412
-`linuxARM64GccDPInt32Opt`, Open MPI 4.1.6, brae `build/brae_rhoSimpleFoam` (built 2026-09-12 11:40) with
-`BRAE_RHOSIMPLEFOAM_MIRROR=cuda`. The machine was otherwise idle: load average 0.22 and 99.1% idle
-before the first run; a `python3.12` process (pid 2223) held 228 MiB of GPU memory at 0% utilisation
-throughout and was left alone; no other user process was running. Every run here was sequential --
-never two solvers at once.
-
-Harness, as shipped: `bench/rhoSimpleFoam/run_benchmark.sh` with
-`BRAE=build/brae_rhoSimpleFoam CORES=20 ITERS=100 SIZES="0.7 1 1.4 2 3"` -- the stock
-`compressible/rhoSimpleFoam/squareBend` (kEpsilon, `transonic yes`, massFlowRate 0.5 kg/s) with every
-hex block's counts scaled by the factor in all three directions; the sampling functionObjects stripped
-from both copies; `residualControl { }`; `endTime` = `writeInterval` = 100. OpenFOAM: `decomposePar`
-with the harness's pinned `simple (5 2 2)` into 20 subdomains (excluded), then
-`mpirun -np 20 rhoSimpleFoam -parallel` timed on its own; `reconstructPar` afterwards (excluded) only
-for the field comparison. brae: one process on the GPU, timed whole. Iterations are counted as
-`^Time = ` lines in each log; both arms completed 100 at every size. The harness prints wall seconds
-to one decimal, so the ratios at the two smallest sizes carry +-4% from rounding alone.
-
-| scale | cells     | brae (s) | OF-20c (s) | it brae | it OF | brae ms/it | OF ms/it | OF / brae | rel L2 at it 100: U / p |
-|------:|----------:|---------:|-----------:|--------:|------:|-----------:|---------:|----------:|-------------------------|
-| 0.7   |    38,416 |      1.4 |        2.2 |     100 |   100 |         14 |       22 |     1.57x | 2.23e-04 / 9.27e-05     |
-| 1     |   112,000 |      2.7 |        4.5 |     100 |   100 |         27 |       45 |     1.67x | 8.61e-04 / 5.41e-04     |
-| 1.4   |   307,328 |      7.2 |       10.4 |     100 |   100 |         72 |      104 |     1.44x | 3.24e-03 / 2.17e-03     |
-| 2     |   896,000 |     21.6 |       26.8 |     100 |   100 |        216 |      268 |     1.24x | 1.51e-02 / 1.20e-02     |
-| 3     | 3,024,000 |     76.0 |      101.7 |     100 |   100 |        760 |     1017 |     1.34x | 1.39e-02 / 1.29e-02     |
-
-(The full rel L2 row, U p T k epsilon, is in the harness CSV: 38k `2.23e-04 9.27e-05 1.43e-04 9.65e-04
-1.05e-03`; 112k `8.61e-04 5.41e-04 8.19e-04 9.08e-03 8.31e-03`; 307k `3.24e-03 2.17e-03 3.50e-03
-3.38e-02 2.62e-02`; 896k `1.51e-02 1.20e-02 5.00e-03 1.48e-01 1.18e-01`; 3.02M `1.39e-02 1.29e-02
-6.22e-03 7.75e-02 5.39e-02`. Trajectory at a matched iteration, as before, not destination.)
-
-OpenFOAM's own `ExecutionTime` at iteration 100 in the same logs -- 1.52, 3.72, 9.59, 25.95 and 100.17 s --
-sits 0.7-1.5 s under the mpirun wall at every size (0.68, 0.78, 0.81, 0.85, 1.53 s), which is the MPI start-up and finalise the harness
-counts on OpenFOAM's side against the CUDA context, mesh upload and final write it counts on brae's.
-
-### Marginal cost per iteration, start-up removed (ITERS=200 against ITERS=100, same harness)
-
-The same harness with `ITERS=200 SIZES="1 2"` (both arms completed 200 at both sizes), and
-(t200 - t100) / 100 as the per-iteration cost with everything that happens once removed:
-
-| cells   | brae t100 / t200 (s) | OF-20c t100 / t200 (s) | brae ms/it | OF ms/it | OF / brae |
-|--------:|---------------------:|-----------------------:|-----------:|---------:|----------:|
-| 112,000 |            2.7 / 4.6 |              4.5 / 7.5 |         19 |       30 |     1.58x |
-| 896,000 |          21.6 / 39.4 |            26.8 / 56.2 |        178 |      294 |     1.65x |
-
-Two single runs each, so the difference carries both runs' noise. OpenFOAM's `ExecutionTime` inside the
-200-iteration run alone reads 3.32 s at iteration 100 and 6.67 s at 200 (33.5 ms/it for iterations
-101-200) at 112k, and 27.23 / 54.95 s (277 ms/it) at 896k -- so the harness marginal of 294 at 896k is the
-within-run 277 plus a 1.3 s difference between two OpenFOAM runs of the same 100 iterations (25.95 s in
-the 100-run, 27.23 s in the 200-run). On brae's side the phase timer below accounts for 174.7 of the
-178 marginal ms independently, and the 200-iteration rel L2 at 112k falls to
-`6.06e-05 5.59e-05 1.38e-05 2.99e-04 3.78e-04` (U p T k epsilon), 896k to
-`5.25e-03 3.40e-03 2.33e-03 3.10e-02 2.49e-02` -- the two trajectories converge on each other as both
-codes converge.
-
-### Where the 896k iteration goes (`BRAE_PHASE_TIME=1`, 100 iterations, the harness's scale-2 mesh)
-
-`BRAE_PHASE_TIME=1 BRAE_RHOSIMPLEFOAM_MIRROR=cuda build/brae_rhoSimpleFoam -case .` on a copy of the
-scale-2 case the harness left behind (endTime 100, writeInterval 100), whole process 21.89 s, 100
-iterations:
-
-| phase                     | s over 100 it | ms/it | share of the four |
-|---------------------------|--------------:|------:|------------------:|
-| pEqn                      |         8.070 |  80.7 |               46% |
-| turbulence                |         4.881 |  48.8 |               28% |
-| UEqn                      |         3.016 |  30.2 |               17% |
-| EEqn                      |         1.501 |  15.0 |                9% |
-| the four                  |        17.468 | 174.7 |                   |
-| of which linear solves: p |         6.960 |  69.6 |                   |
-| of which linear solves: U |         2.808 |  28.1 |                   |
-| of which linear solves: he|         1.271 |  12.7 |                   |
-
-The whole process is 218.9 ms per iteration averaged over 100, so 4.4 s of the 21.9 s -- one fifth of
-brae's wall at this size -- is outside the four phases: start-up (mesh read, geometry, device upload),
-the final write, and whatever sits between the phases. Against the 2026-09-07 split at the same size
-(pEqn 315.4, UEqn 71.7, turbulence 36.6, EEqn 16.7; 440.5 ms in the four) the pressure is 3.9x cheaper
-and the momentum 2.4x, and the turbulence block is 12 ms MORE (36.6 -> 48.8) and is now the second
-phase. (The 2026-09-07 split was over 20 iterations; this one is over 100.)
-
-### Reading against the 2026-09-08 table
-
-On 2026-09-08 the sweep read 38k 2.1 vs 2.2 (1.05x), 112k 3.8 vs 4.0 (1.05x), 306k 8.0 vs 9.1 (1.14x),
-896k 21.9 vs 31.1 (1.42x). Today brae is faster at every size below 896k -- 2.1 -> 1.4, 3.8 -> 2.7,
-8.0 -> 7.2 -- and unchanged at 896k (21.9 -> 21.6), so the porting campaign since then cost the device
-arm nothing at the large size and took a third off at 38k and 112k and a tenth off at 307k (the
-2026-09-08 306k row is 305,760 cells; today's scale 1.4 gives 307,328). OpenFOAM's side moved too, in both
-directions: 4.0 -> 4.5 at 112k, 9.1 -> 10.4 at 307k, and 31.1 -> 26.8 at 896k, the last a 14% swing on
-the same decomposition and the same binary, which is the size of the run-to-run variation these single
-runs carry. The ratios are therefore 1.57x / 1.67x / 1.44x / 1.24x / 1.34x, and the earlier reading
-that the margin "GROWS with the mesh" does not survive this run: the whole-process ratio at 896k fell
-from 1.42x to 1.24x entirely from OpenFOAM's faster run. The marginal-cost table is the steadier
-statement -- 1.58x at 112k and 1.65x at 896k with start-up removed -- and the gap between 1.65x
-marginal and 1.24x whole-process at 896k is the 4.4 s brae spends outside its iteration loop, one fifth
-of its wall there, which OpenFOAM's start-up (0.85 s between its ExecutionTime and the mpirun wall) does
-not match. The new point at 3.02M cells, 76.0 vs 101.7 s, says the margin holds at 3.4x the largest
-mesh measured before; whether it is 1.34x or the marginal 1.6x at that size was not measured (no
-200-iteration run at scale 3). The crossover is still below the smallest mesh here.
-
-Logs: `bench_rho/{brae,of}_{0.7,1,1.4,2,3}/log.{brae,of}` and `results.csv`, `bench_rho200/...`,
-`phase_2/log.phase`, under the session scratchpad
-`/tmp/claude-1001/-home-ghost-cudafoam-brae/bc44d28b-1981-4649-b415-1a0f6b5c1349/scratchpad/`, with
-`machine_state_before.txt` / `machine_state_after.txt` (nvidia-smi, uptime, top).
-
-## The size sweep after the porting campaign (2026-09-12)
-
 Same harness, same rules (100 fixed SIMPLE iterations, prep excluded on both sides, OpenFOAM on 20 Grace
 cores with the deterministic `simple (5 2 2)` decomposition, `nProcs : 20` in every OpenFOAM log, 100
-`Time =` lines in every log on both sides). The binary is the OF-mirror CUDA arm at commit a5266d0 --
-about sixty porting commits after the 2026-09-08 table (leastSquares and cellLimited gradients, the
-stored patch values, the liquid thermo, the live energy boundary, limitedLinear on the closures, the
-Neumann-series preconditioner on k/epsilon, the expression PatchFunction1). None of them is exercised by
-squareBend except the closure preconditioner, so this is mostly a re-measurement of the same code path
-on the same machine, four days later.
+`Time =` lines in every log on both sides; the sampling functionObjects stripped from both copies,
+`residualControl { }`). The binary is the OF-mirror CUDA arm at commit a5266d0 -- about sixty porting
+commits after the 2026-09-08 table (leastSquares and cellLimited gradients, the stored patch values, the
+liquid thermo, the live energy boundary, limitedLinear on the closures, the Neumann-series
+preconditioner on k/epsilon, the expression PatchFunction1). squareBend exercises none of them except
+the closure preconditioner, so this is mostly a re-measurement of the same code path four days later.
+A resident `python3.12` (pid 2223) held 228 MiB of GPU memory at 0% utilisation throughout.
 
-| cells     | brae (s) | OF-20c (s) | brae is | 2026-09-08 was |
-|----------:|---------:|-----------:|--------:|---------------:|
-|    38,416 |      1.5 |        2.3 |   1.53x |          1.05x |
-|   112,000 |      2.8 |        4.6 |   1.64x |          1.05x |
-|   307,328 |      7.4 |        9.9 |   1.34x |          1.14x |
-|   896,000 |     21.7 |       28.4 |   1.31x |          1.42x |
-| 3,024,000 |     76.0 |      104.7 |   1.38x |       (not run)|
+TWO INDEPENDENT RUNS of the same sweep the same afternoon, A first and B about ninety minutes later,
+the machine idle for both (load average 0.06-0.22 before each). The pair is the run-to-run variance
+measurement this file lacked:
 
-Reproducibility: scale 1 rerun back to back, brae 2.6 against 2.8, OpenFOAM 4.3 against 4.6 -- 7% on
-each side, which is the clock variance the harness README warns about; nothing here separates two
-numbers 7% apart. The rel L2 columns (trajectory at iteration 100, brae AMG-preconditioned BiCGStab
-against OpenFOAM GAMG on the transonic p) are in the CSV: U 2.2e-04 at 38k rising to 1.5e-02 at 896k,
-the same shape as before.
+| cells     | brae A | brae B | OF-20c A | OF-20c B | brae is, A | brae is, B | 2026-09-08 |
+|----------:|-------:|-------:|---------:|---------:|-----------:|-----------:|-----------:|
+|    38,416 |    1.4 |    1.5 |      2.2 |      2.3 |      1.57x |      1.53x |      1.05x |
+|   112,000 |    2.7 |    2.8 |      4.5 |      4.6 |      1.67x |      1.64x |      1.05x |
+|   307,328 |    7.2 |    7.4 |     10.4 |      9.9 |      1.44x |      1.34x |      1.14x |
+|   896,000 |   21.6 |   21.7 |     26.8 |     28.4 |      1.24x |      1.31x |      1.42x |
+| 3,024,000 |   76.0 |   76.0 |    101.7 |    104.7 |      1.34x |      1.38x |   (not run)|
+
+brae repeats to within 0.1 s at every size; OpenFOAM moves by up to 6% between the two runs (and by 14%
+against the 2026-09-08 run at 896k, 31.1 then, on the same decomposition and binary). A third scale-1
+pair, run back to back after B, read 2.6 / 4.3. The rel L2 columns (trajectory at iteration 100, brae
+AMG-preconditioned BiCGStab against OpenFOAM GAMG on the transonic p) were identical in A and B, as they
+must be for a deterministic pair of codes: U 2.23e-04 / p 9.27e-05 at 38k, 8.61e-04 / 5.41e-04 at 112k,
+3.24e-03 / 2.17e-03 at 307k, 1.51e-02 / 1.20e-02 at 896k, 1.39e-02 / 1.29e-02 at 3.02M (T, k, epsilon in
+the harness CSV). OpenFOAM's own `ExecutionTime` at iteration 100 in run A's logs (1.52, 3.72, 9.59,
+25.95, 100.17 s) sits 0.7-1.5 s under the mpirun wall at every size: MPI start-up and finalise, which
+the harness counts on OpenFOAM's side against the CUDA context, mesh upload and final write it counts
+on brae's.
 
 ### Per-iteration cost with the start-up removed
 
 The 100-iteration wall includes each code's start-up (brae: mesh load, device set-up, the AMG hierarchy;
-OpenFOAM: MPI start-up and field reads), which at these sizes is a visible share. The same harness at
-ITERS=200 gives the cost of iterations 101-200 alone:
+OpenFOAM: MPI start-up and field reads), a visible share at these sizes. The same harness at ITERS=200,
+in both runs, gives (t200 - t100) / 100 -- the cost of iterations 101-200 alone:
 
-| cells   | brae 100 it | brae 200 it | brae ms/it (101-200) | OF 100 it | OF 200 it | OF ms/it (101-200) | brae is |
-|--------:|------------:|------------:|---------------------:|----------:|----------:|-------------------:|--------:|
-| 112,000 |         2.8 |         4.8 |                   20 |       4.6 |       6.8 |                 22 |   1.1x  |
-| 896,000 |        21.7 |        39.2 |                  175 |      28.4 |      63.4 |                350 |   2.0x  |
+| cells   | brae t100 / t200, A | B           | OF t100 / t200, A | B           | brae ms/it A / B | OF ms/it A / B | brae is, A / B |
+|--------:|--------------------:|------------:|------------------:|------------:|-----------------:|---------------:|---------------:|
+| 112,000 |           2.7 / 4.6 |   2.8 / 4.8 |         4.5 / 7.5 |   4.6 / 6.8 |          19 / 20 |        30 / 22 |    1.6x / 1.1x |
+| 896,000 |         21.6 / 39.4 | 21.7 / 39.2 |       26.8 / 56.2 | 28.4 / 63.4 |        178 / 175 |      294 / 350 |    1.7x / 2.0x |
 
-At 896k OpenFOAM's second hundred iterations cost 350 ms each where its first hundred cost about 260:
-its GAMG work grows as the transonic flow develops. brae's does not move -- `BRAE_PHASE_TIME=1` on the
-same mesh over the first 100 iterations reads 174.7 ms/it, the same number as iterations 101-200.
+brae's marginal cost repeats to 1-2%; OpenFOAM's 200-iteration run differs by 7 s (56.2 against 63.4)
+between A and B on the same case, so its marginal number is the difference of two runs that each carry
+that variance. Its own `ExecutionTime` inside run A's 200-iteration run reads 277 ms/it for iterations
+101-200 at 896k against 260 for the first hundred: its GAMG work grows as the transonic flow develops.
+brae's does not move -- `BRAE_PHASE_TIME=1` on the same mesh over the first 100 iterations reads 174.7
+ms/it in both runs, the same number as iterations 101-200.
 
-### Where the 175 ms go (896k, BRAE_PHASE_TIME=1, 100 iterations)
+### Where the 175 ms go (896k, BRAE_PHASE_TIME=1, 100 iterations, identical in A and B)
 
 | phase       | ms/it | of which the linear solve |
 |-------------|------:|--------------------------:|
-| UEqn        |  30.2 |                      28.1 |
-| EEqn        |  15.2 |                      12.7 |
 | pEqn        |  80.4 |                      69.2 |
 | turbulence  |  48.9 |                         - |
+| UEqn        |  30.2 |                      28.1 |
+| EEqn        |  15.2 |                      12.7 |
 | four phases | 174.7 |                           |
 
-Against the 2026-09-08 phase table at 306k (UEqn 11.0, EEqn 7.0, pEqn 29.4, turbulence 14.2, ~62 ms/it)
-the shape is unchanged and the pressure is still the largest block. The turbulence block is the one that
-grew relative to the others (48.9 of 174.7 here against 14.2 of 62 there): it now carries the degree-22
-Neumann-series preconditioner on k and epsilon that the health measurements above required, and the
-limitedLinear assembly the case asks for.
+The whole process averages 217-219 ms per iteration over 100, so 4.4 s of the 21.7 s wall -- one fifth
+at this size -- is outside the four phases: start-up, the final write, and what sits between them.
+Against the 2026-09-07 split at the same size (pEqn 315.4, UEqn 71.7, turbulence 36.6, EEqn 16.7; 440.5
+in the four) the pressure is 3.9x cheaper and the momentum 2.4x, and the turbulence block is 12 ms MORE
+(36.6 -> 48.9) and is now the second phase: it carries the degree-22 Neumann-series preconditioner on k
+and epsilon that the health measurements above required, and the limitedLinear assembly the case asks.
+
+### Reading against the 2026-09-08 table
+
+On 2026-09-08 the sweep read 38k 2.1 vs 2.2 (1.05x), 112k 3.8 vs 4.0 (1.05x), 306k 8.0 vs 9.1 (1.14x),
+896k 21.9 vs 31.1 (1.42x). brae is faster at every size below 896k -- 2.1 -> 1.4-1.5, 3.8 -> 2.7-2.8,
+8.0 -> 7.2-7.4 -- and unchanged at 896k (21.9 -> 21.6-21.7): the porting campaign cost the device arm
+nothing at the large size and took a third off the two smallest. OpenFOAM's side moved in both
+directions (4.0 -> 4.5-4.6 at 112k, 31.1 -> 26.8-28.4 at 896k), so the 896k whole-process ratio fell
+from 1.42x to 1.24-1.31x entirely on OpenFOAM's variance, and the earlier reading that the margin
+"grows with the mesh" does not survive as a whole-process statement; the marginal-cost table is the
+steadier one, 1.6-2.0x at 896k with the start-up removed. The new point at 3.02M cells, 76.0 against
+101.7-104.7 s, says the margin holds at 3.4x the largest mesh measured before. The crossover is still
+below the smallest mesh here.
+
+Run B's logs: `bench_rho/{brae,of}_{0.7,1,1.4,2,3}/log.{brae,of}` and `results.csv`, `bench_rho200/`,
+`bench_rho_rerun/`, `phase_2/`, under the session scratchpad
+`/tmp/claude-1001/-home-ghost-cudafoam-brae/bc44d28b-1981-4649-b415-1a0f6b5c1349/scratchpad/`. Run A
+used the same work directory and its logs were overwritten by run B; its numbers are the ones its
+operator transcribed from them before that.
 
 ### What the CUDA arm still does on the host, per iteration (read from the code, 2026-09-12)
 
@@ -1065,4 +993,3 @@ beyond that: a flowRateInletVelocity's gSum(rho*magSf) (one blocking reduction p
 iteration), the `expression` PatchFunction1 on T (host-evaluated on the patch's cells, whole-field
 downloads of the fields it names), adjustPhi's four scalars on a case whose p has no fixed-value patch,
 and the closed-volume correction's whole-field p round trip on a closed domain.
-

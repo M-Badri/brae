@@ -99,3 +99,41 @@ aerofoil 5.9e-04 / 3.0e-04, angledDuct 2.5e-04 / 3.4e-05, squareBend 8.1e-04 / 5
 are two codes at different points of their own solver's path at a loose tolerance; the agreement of the
 discretisation itself is the tutorial gate's, 1e-11 and below at 1e-14 tolerances over the first three
 iterations (`tests/rho_tutorials_vs_openfoam.sh`).
+
+## Where each tutorial's iteration goes (BRAE_PHASE_TIME=1, 100 iterations, ms per iteration)
+
+The four phases per iteration, and the linear solve inside three of them; the last column is the
+marginal per-iteration cost from the 200-iteration runs above, so the difference between it and the
+four-phase sum is what the iteration spends outside the phases (boundary updates before the momentum
+assembly, the thermo, the continuity report, the residual bookkeeping).
+
+| tutorial                     |   cells | model                | UEqn | EEqn | pEqn | turb | U solve | he solve | p solve | four | marginal ms/it |
+|------------------------------|--------:|----------------------|-----:|-----:|-----:|-----:|--------:|---------:|--------:|-----:|---------------:|
+| aerofoilNACA0012             |  16,000 | kOmegaSST            |  1.1 |  3.1 |  3.8 |  5.7 |     0.5 |      2.2 |     2.9 | 13.7 |             13 |
+| angledDuctExplicitFixedCoeff |  28,000 | kEpsilon             |  1.5 |  1.4 |  2.4 |  3.1 |     0.2 |      1.0 |     1.4 |  8.4 |              9 |
+| squareBend                   | 112,000 | kEpsilon             |  3.4 |  2.3 |  8.0 |  4.3 |     2.3 |      1.0 |     5.7 | 18.0 |             21 |
+| squareBendLiq                | 112,000 | kEpsilon, liquid     |  3.4 |  9.8 |  6.6 | 13.3 |     2.5 |      6.1 |     5.0 | 33.1 |             33 |
+| squareBendLiqNoNewtonian     | 112,000 | generalizedNewtonian |  3.7 |  6.5 |  7.4 |  0.8 |     2.6 |      5.0 |     5.6 | 18.4 |             17 |
+| injectorPipe                 |  74,650 | kEpsilon             |  4.1 |  3.1 |  6.3 |  9.6 |     3.3 |      2.3 |     4.3 | 23.1 |             21 |
+
+The same four phases per cell -- nanoseconds per cell per iteration -- which is the number that
+compares a 16k mesh with a 112k one:
+
+| tutorial                     | UEqn | EEqn | pEqn | turb | four |
+|------------------------------|-----:|-----:|-----:|-----:|-----:|
+| aerofoilNACA0012             |   69 |  194 |  237 |  356 |  856 |
+| angledDuctExplicitFixedCoeff |   54 |   50 |   86 |  111 |  300 |
+| squareBend                   |   30 |   21 |   71 |   38 |  161 |
+| squareBendLiq                |   30 |   88 |   59 |  119 |  296 |
+| squareBendLiqNoNewtonian     |   33 |   58 |   66 |    7 |  164 |
+| injectorPipe                 |   55 |   42 |   84 |  129 |  309 |
+
+Read per cell, squareBend (upwind, GAMG entries substituted by device BiCGStab, kEpsilon) is the floor
+at 161 ns/cell, and everything above it names a module: the kOmegaSST closure on the 16k aerofoil at
+356 ns/cell of turbulence against kEpsilon's 38 (a latency-bound mesh, but 9x per cell); the
+smoothSolver cases' energy and turbulence solves on the CPU smoother (squareBendLiq 88 and 119 ns/cell
+against squareBend's 21 and 38); injectorPipe's turbulence at 129 ns/cell, which carries leastSquares
+gradients, `Gauss limitedLinear 1` on k and epsilon, the Euler ddt, and the host smoother; the liquid
+energy phase outside its solve (squareBendLiq and NoNewtonian: the he-to-T Newton inversion per cell,
+the live energy boundary, the expression walls). None of those modules has had a speed measurement of
+its own yet; this table is where the digging starts.
