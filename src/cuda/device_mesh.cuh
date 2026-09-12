@@ -26,6 +26,13 @@ struct DeviceMesh
     DeviceBuffer<label>  bndIsEmpty;                                // 1 if the boundary face is on an empty patch
     DeviceBuffer<scalar> dOwnX,dOwnY,dOwnZ, dNeiX,dNeiY,dNeiZ;      // internal face: Cf - C(owner) / Cf - C(neighbour) (linearUpwind)
     DeviceBuffer<scalar> dBndX,dBndY,dBndZ;                         // boundary face: Cf - C(faceCell) (cellLimited grad extrapolation)
+    // leastSquaresVectors' inverted dd tensor, 6*nCells component-major, GEOMETRY ONLY (d vectors,
+    // weights, |Sf|, the empty-patch skip) -- OpenFOAM builds it once per mesh as a MeshObject and so
+    // does brae since FP-3: filled by the first least-squares gradient (lsqInvDdFor, device_fvc.cu).
+    // Mutable because every gradient call takes the mesh const, and the tensor is a property of it.
+    // Measured before, gasMixing/injectorPipe at 74,650 cells: the tensor was rebuilt at every one of
+    // the 10 least-squares gradients of an iteration, 2.0 of the iteration's 15.8 GPU ms.
+    mutable DeviceBuffer<scalar> lsqInvDd;
     // non-orthogonal correction (OF "corrected" laplacian/snGrad): nonOrthDc = 1/max(n.delta, 0.05|delta|)
     // is the implicit deltaCoeffs; corrVec = n - delta*nonOrthDc the explicit deferred-correction vector.
     DeviceBuffer<scalar> nonOrthDc, corrVecX, corrVecY, corrVecZ;   // per internal face
@@ -227,6 +234,11 @@ inline void refreshDeviceMeshGeometry(
     dm.dOwnX = std::move(fresh.dOwnX); dm.dOwnY = std::move(fresh.dOwnY); dm.dOwnZ = std::move(fresh.dOwnZ);
     dm.dNeiX = std::move(fresh.dNeiX); dm.dNeiY = std::move(fresh.dNeiY); dm.dNeiZ = std::move(fresh.dNeiZ);
     dm.dBndX = std::move(fresh.dBndX); dm.dBndY = std::move(fresh.dBndY); dm.dBndZ = std::move(fresh.dBndZ);
+    // leastSquaresVectors is a MeshObject with MoveableMeshObject semantics: a move invalidates it
+    // (leastSquaresVectors.C movePoints -> calcLeastSquaresVectors). Every input of the cached tensor
+    // -- w, magSf, Sf, dOwn, dNei, dBnd -- has just been replaced above, so dropping it here is what
+    // keeps the cache from serving a pre-move fit on a moving mesh (FP-3).
+    dm.lsqInvDd.resize(0);
     // owner/nei, ownerStart/losort/losortStart, bnd* deliberately NOT touched: topology, unchanged.
 }
 
@@ -261,6 +273,19 @@ void deviceGaussGradFused(const DeviceMesh& dm, int n,
                           const DeviceBuffer<scalar>* const* vol, const DeviceBuffer<scalar>* const* bval,
                           DeviceBuffer<scalar>* gx, DeviceBuffer<scalar>* gy, DeviceBuffer<scalar>* gz,
                           const int* skipIf = nullptr);
+// The least-squares twin of deviceGaussGradFused: up to three fields fitted in ONE launch that reads
+// the addressing, the d vectors and the cell's inverted dd tensor once. Bit-identical per field to
+// deviceLeastSquaresGrad (tests/test_lsq_grad_fused.cu, memcmp). The raw form writes into slices the
+// caller owns (a 9*nC grad(U) tensor), so the vector gradient needs no copies and no stream sync.
+void deviceLeastSquaresGradFused(const DeviceMesh& dm, int n,
+                                 const DeviceBuffer<scalar>* const* vol, const DeviceBuffer<scalar>* const* bval,
+                                 DeviceBuffer<scalar>* gx, DeviceBuffer<scalar>* gy, DeviceBuffer<scalar>* gz);
+void deviceLeastSquaresGradFusedRaw(const DeviceMesh& dm, int n,
+                                    const scalar* const* vol, const scalar* const* bval,
+                                    scalar* const* gx, scalar* const* gy, scalar* const* gz);
+// The mesh's inverted dd tensor, built on the first request and cached on the mesh (see DeviceMesh).
+// BRAE_LSQ_INVDD=recompute rebuilds it at every request: the control that restores the old path.
+const scalar* lsqInvDdFor(const DeviceMesh& dm);
 
 // The COUPLED-PATCH half of cellLimitedGrad, which brae's addressing cannot see on its own.
 //

@@ -341,15 +341,11 @@ void deviceDivDevReff(
     DeviceBuffer<scalar> gxs[3], gys[3], gzs[3];
     // fvc::grad(U) through the case's grad(U) entry (linearViscousStress.C's divDevRhoReff takes
     // dev2(T(fvc::grad(U)))): leastSquares where it resolves so, the host's gradULeastSq.
-    if (gradULeastSq)
-    {
-        for (int i = 0; i < 3; ++i) deviceLeastSquaresGrad(dm, *Uc[i], bvals[i], gxs[i], gys[i], gzs[i]);
-    }
-    else
     {
         const DeviceBuffer<scalar>* vol[3] = {Uc[0], Uc[1], Uc[2]};
         const DeviceBuffer<scalar>* bv[3]  = {&bvals[0], &bvals[1], &bvals[2]};
-        deviceGaussGradFused(dm, 3, vol, bv, gxs, gys, gzs);
+        if (gradULeastSq) deviceLeastSquaresGradFused(dm, 3, vol, bv, gxs, gys, gzs);   // FP-3: one launch
+        else              deviceGaussGradFused(dm, 3, vol, bv, gxs, gys, gzs);
     }
     for (int i = 0; i < 3; ++i)
     {

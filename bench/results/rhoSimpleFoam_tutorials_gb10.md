@@ -346,9 +346,101 @@ for DILU kept (1.00, 1.00, 1.01); no `bounding` line on either arm; the series' 
 0.8x DILU's (0.59x). Both arms are deterministic since D-1, so the bounds are the measurement rounded
 outward.
 
-Two gates pin DILU with the hatches, and say why in their headers: `rho_sbmatched_transient` and
+Four gates pin DILU with the hatches, and say why in their headers. `rho_sbmatched_transient` and
 `rho_gradp_lsq_simplec` hold the ASSEMBLY at 1e-10 with the solvers pinned to 1e-12 / 1e-14, and at
 those tolerances the residual leaves the iterate free at about 1e-9 (the series lands k 5.4e-09,
-epsilon 3.3e-09 from OpenFOAM's; DILU, OpenFOAM's own algorithm, 8e-12). Their bounds are unchanged.
+epsilon 3.3e-09 from OpenFOAM's; DILU, OpenFOAM's own algorithm, 8e-12). `eeqn_limitedlinear` measures
+a SCHEME against OpenFOAM at 1e-10 while validation/rhoLU's own relTol is 0.1, where the series reads
+2.33e-06 and DILU 1.30e-10. `dilu_single_block_identity` compares the two DILU WALKS, and its sbMatched
+and rhoBox arms had gone vacuous -- both arms agreeing because neither built a walk any more; its own
+"walked one block" check caught that, which is what such a check is for. Every bound is unchanged.
+
+AND THE POLICY FOUND A DEFECT IN THE SOLVER, which is the reason to put a second field on the series.
+PBiCGStab has two loops -- a device conditional-graph loop and the host loop it falls back to when
+checkEvery is above 1, `BRAE_BICG_HOST_LOOP=1` or `BRAE_NORMFACTOR_HOST=1` is set, or the graph
+declines -- and the fallback call forwarded every argument except `polyDeg`. A solve that took it ran
+the bare DIAGONAL where the caller asked for a degree-d series. Nothing in a residual line shows it:
+the solve still reaches the case's tolerance, it just stops somewhere else. It surfaced because
+`normfactor_device_identity` holds the two normFactor paths byte-identical, and once the energy solve
+took the series its rhoBox arm diverged from iteration 2 (49 of 51 lines). Fixed by forwarding the
+degree; `tests/bicg_polydeg_host_loop.sh` now holds the same case identical through the graph loop,
+the host loop and the host-read normFactor, with the case's own DILU as the control that proves the
+preconditioner moves the iterate there. Fail-proof RUN: dropping the degree again turned both gates
+red. The turbulence pair has taken this series since the flat-plate fix, so any of its solves that
+fell back ran the diagonal too.
 The rest ran on the new default: `ctest -R rho -LE slow` (72), rho_sst_device, rho_naca_restart,
 rho_tutorials, rho_run_to_run_identity, sa_precon, turb_precon, precon_policy_one_rule -- all pass.
+
+## FP-3: the leastSquares gradient -- the dd tensor is the mesh's, and one fit carries three fields (2026-09-12)
+
+nsys on gasMixing/injectorPipe at 74,650 cells (`--cuda-graph-trace=node`, NVTX phases, 20 iterations)
+put 3.6 of the iteration's 15.8 GPU ms in the leastSquares gradient: ten `lsqInvDdKernel` launches at
+1.99 ms and ten `lsqGradKernel` at 1.57. The first number is the finding. OpenFOAM builds
+leastSquaresVectors ONCE per mesh (a MeshObject, invalidated on a move); brae rebuilt the inverted dd
+tensor inside every gradient call, and that tensor depends only on the geometry -- the d vectors, the
+weights, |Sf| and the empty-patch skip -- never on the field being fitted.
+
+Three levers, each bit-identical by construction:
+
+- The tensor is cached on the DeviceMesh (`lsqInvDdFor`), built on first request and dropped in
+  `refreshDeviceMeshGeometry`, which is where OpenFOAM's MeshObject is invalidated too. Ten launches
+  per iteration became one per mesh. `BRAE_LSQ_INVDD=recompute` restores the old rebuild.
+- Up to three fields are fitted in ONE launch (`deviceLeastSquaresGradFused`), the least-squares twin
+  of `deviceGaussGradFused`: the same three face loops in the same order, each field's sum in its own
+  registers, the shared operands (d, |Sf|/|d|^2, the cell's (invDd & d)) read once. A raw form writes
+  into slices the caller owns, so `deviceLeastSquaresGradU` now fills the 9*nC grad(U) tensor in one
+  launch where it took three fits, nine device-to-device copies and THREE `cudaStreamSynchronize` --
+  one per component, each draining the GPU pipeline. The momentum assembly's four component loops and
+  divDevRhoReff's take the same path.
+- Each scalar assembly evaluates a field's boundary values and its gradient ONCE per (base scheme,
+  cellLimited coefficient) pair it asks for. The limitedLinear limiter, linearUpwind's correction and
+  the corrected laplacian all read the case's `grad(<field>)` entry, so the energy assembly fitted
+  grad(he) twice and each closure fitted its field twice, per iteration.
+
+| injectorPipe, 74,650 cells | before | after |
+|----------------------------|-------:|------:|
+| lsqInvDdKernel per iteration | 10.0 (1.99 ms) | 0.1 (0.01 ms) |
+| lsqGradKernel per iteration  | 10.0 (1.57 ms) | 7.0 (1.50 ms) |
+| device-to-device copies      | 192.5 (0.74 ms) | 189.5 (0.56 ms) |
+| GPU ms per iteration         | 15.79 | 13.73 |
+| stream syncs in the gradient | 3 per grad(U) | 0 |
+
+Wall, three runs of 100 iterations each (BRAE_PHASE_TIME=1, the tutorial as it ships):
+
+| phase       | before (3 runs) | after (3 runs) |
+|-------------|----------------:|---------------:|
+| UEqn        | 4.3 / 4.3 / 4.3 | 4.2 / 4.2 / 4.2 |
+| EEqn        | 3.3 / 3.4 / 3.4 | 2.8 / 2.8 / 2.8 |
+| pEqn        | 6.9 / 7.2 / 7.0 | 6.8 / 6.8 / 6.7 |
+| turbulence  | 4.5 / 4.4 / 4.5 | 3.6 / 3.5 / 3.6 |
+| four phases | 18.9 / 19.2 / 19.1 | 17.3 / 17.3 / 17.2 |
+
+BIT-IDENTITY, end to end: a reference binary built from the working tree with the seven FP-3 files
+reverted to HEAD, against the new one, 20 iterations of injectorPipe (leastSquares everywhere) and of
+squareBend (Gauss, where the shared-gradient lever is live and the fused fit is not): every residual
+line identical and all nine written fields byte-identical on both cases. Unit gate
+`tests/test_lsq_grad_fused.cu` (ctest `lsq_grad_fused`) holds the fused fit to memcmp against
+`deviceLeastSquaresGrad` for n = 1, 2 and 3 on a sheared box and on an empty-patch variant, with the
+raw form, the one-ulp cross-contamination controls, the empty-face skip and the cache's identity and
+its per-mesh control. Its fail-proof was RUN: reading field 0's boundary values for every field turned
+10 arms red and the exit code to 1.
+
+THE ROW'S TARGET IS NOT MET AND THE REASON IS NOT THE GRADIENT. FP-3 asked for UEqn at or under 40
+ns/cell on injectorPipe; it reads 56 (4.2 ms at 74,650 cells), down from 58. That case names
+`grad(U) cellLimited Gauss linear 0.99`, so the fused least-squares fit never fires in the momentum
+phase at all: what the phase spends is 1.9 GPU ms of `cellLimitGradKernel` (12 launches) and the
+colour sweeps. The limited assembly is FP-4's row, and this measurement is the evidence for it. What
+FP-3 did reach -- the energy and turbulence phases, where the scalar fits live -- came down 15% and
+20%.
+
+## The whole suite, after all three changes (2026-09-12)
+
+`ctest -j 4`, 472 tests, on a tree rebuilt from scratch first -- the earlier round reported a false
+failure from a `build/brae` five hours older than the sources, which is the trap CLAUDE.md names. 462
+pass. Of the ten that do not, `dilu_single_block_identity` was the policy going vacuous (fixed above,
+now green) and the other nine fail IDENTICALLY at HEAD, checked by building a reference tree with every
+file this session touched reverted: `liquid_correct`, `etot`, `hetot`, `linear_solver_setup`,
+`uniform_function1`, `mean_velocity_force`, `eval_scoped`, `pimple_loop_contract` (unit tests, all
+aborting or failing the same way at HEAD) and `coupledinterfacescheme_vs_openfoam`, whose pipeCyclic
+run diverges to a non-finite residual at iteration 33 with the HEAD binary exactly as with this one.
+They are open defects on this branch, none of them in what was changed here.

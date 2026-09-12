@@ -331,7 +331,7 @@ void assembleUEqn(
             // grad(U)'s base scheme: leastSquares where the case resolves it so (the host's gradULeastSq).
             if (in.gradULeastSq)
             {
-                for (int k = 0; k < 3; ++k) deviceLeastSquaresGrad(dm, *Usrc[k], ub[k], gx[k], gy[k], gz[k]);
+                deviceLeastSquaresGradFused(dm, 3, Usrc, ubp, gx, gy, gz);   // FP-3: one launch, not three
             }
             else
             {
@@ -555,7 +555,7 @@ void assembleUEqn(
         // correctedSnGrad's correction takes grad(U)'s own scheme (correctedSnGrad.C:52-55).
         if (in.gradULeastSq)
         {
-            for (int k = 0; k < 3; ++k) deviceLeastSquaresGrad(dm, *U[k], ub[k], gxc[k], gyc[k], gzc[k]);
+            deviceLeastSquaresGradFused(dm, 3, U, ubp, gxc, gyc, gzc);   // FP-3: one launch, not three
         }
         else
         {
@@ -623,7 +623,7 @@ void assembleUEqn(
         // The NAMED gradient's base scheme, as the host reference reads it (rhoUEqn_cpp.cu:200): grad(U)'s.
         if (in.gradULeastSq)
         {
-            for (int k = 0; k < 3; ++k) deviceLeastSquaresGrad(dm, *Usrc[k], ub[k], gx[k], gy[k], gz[k]);
+            deviceLeastSquaresGradFused(dm, 3, Usrc, ubp, gx, gy, gz);   // FP-3: one launch, not three
         }
         else
         {
@@ -664,7 +664,7 @@ void assembleUEqn(
         const DeviceBuffer<scalar>* ubp[3] = {&ub[0], &ub[1], &ub[2]};
         if (in.gradULeastSq)   // as above: the host's rhoUEqn_cpp.cu:215
         {
-            for (int k = 0; k < 3; ++k) deviceLeastSquaresGrad(dm, *U[k], ub[k], gx[k], gy[k], gz[k]);
+            deviceLeastSquaresGradFused(dm, 3, U, ubp, gx, gy, gz);   // FP-3: one launch, not three
         }
         else
         {

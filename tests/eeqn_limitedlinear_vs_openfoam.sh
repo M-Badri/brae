@@ -70,7 +70,14 @@ PYEOF
     ( set +u; . "$OFBASH" > /dev/null 2>&1; set -u; cd "$1" && blockMesh > log.bm 2>&1 )
 }
 runOF()   { ( set +u; . "$OFBASH" > /dev/null 2>&1; set -u; cd "$1" && rhoSimpleFoam > run.log 2>&1 ); }
-runBrae() { ( cd "$2" && BRAE_RHOSIMPLEFOAM_MIRROR="$1" "$BRAE" -case "$2" > run.log 2>&1 ); }
+# BRAE_DILU_HE=1: validation/rhoLU names `PBiCGStab` with `DILU` on e and relaxes it at 0.7, so since
+# the FP-2 policy (2026-09-12) the CUDA arm answers that entry with a degree-7 truncated Neumann series.
+# This gate holds the ASSEMBLY -- brae's limitedLinear against OpenFOAM's, at 1e-10 -- while the case's
+# own relTol is 0.1, and at that relTol the preconditioner decides where the solve stops: the series
+# reads 2.33e-06 against OpenFOAM where DILU, OpenFOAM's own algorithm, reads 1.30e-10. So the arm that
+# measures a scheme runs the case's preconditioner. Bounds unchanged; the policy has its own gate
+# (rho_dilu_entry_policy_vs_openfoam).
+runBrae() { ( cd "$2" && BRAE_DILU_HE=1 BRAE_RHOSIMPLEFOAM_MIRROR="$1" "$BRAE" -case "$2" > run.log 2>&1 ); }
 relT() {    # relT <dirA> <dirB> <time>
     python3 - "$1/$3/T" "$2/$3/T" <<'PYEOF'
 import re, os, sys, math

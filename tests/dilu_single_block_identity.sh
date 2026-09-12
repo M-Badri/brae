@@ -81,10 +81,16 @@ arm() {   # arm <label> <fixture> <endTime> <env> <flag> <fields...>
     [ $same -eq 1 ] && say "$label  ...and every written field at $t is an identical file" ok \
                     || say "$label  ...and every written field at $t is an identical file" FAIL
 }
-arm "ARM 1" sbMatched     20 "BRAE_RHOSIMPLEFOAM_MIRROR=cuda" "-case" U p T rho phi k epsilon
-arm "ARM 2" rhoBox        50 "BRAE_RHOSIMPLEFOAM_MIRROR=cuda" "-case" U p T rho phi
+# BRAE_DILU_KE=1 BRAE_DILU_HE=1 on the two compressible arms: both cases name `PBiCGStab` with `DILU`
+# on relaxed fields, so since the FP-2 policy (2026-09-12) the CUDA mirror answers those entries with a
+# truncated Neumann series and builds NO DILU walk at all -- which is what the "walked one block" checks
+# caught, both arms agreeing because neither walked. The hatches keep the case's DILU, which is the
+# thing this gate exists to compare. ARM 3 is the incompressible V2 path, where the policy does not
+# apply, and is left as it was.
+arm "ARM 1" sbMatched     20 "BRAE_DILU_KE=1 BRAE_DILU_HE=1 BRAE_RHOSIMPLEFOAM_MIRROR=cuda" "-case" U p T rho phi k epsilon
+arm "ARM 2" rhoBox        50 "BRAE_DILU_KE=1 BRAE_DILU_HE=1 BRAE_RHOSIMPLEFOAM_MIRROR=cuda" "-case" U p T rho phi
 arm "ARM 3" pitzDailyTurb 30 "BRAE_SIMPLEFOAM_V2=1"           ""      U p k epsilon nut phi
-prep "$W/ctl" sbMatched 20 loose; run "$W/ctl" "BRAE_DILU_SINGLE=1 BRAE_RHOSIMPLEFOAM_MIRROR=cuda" "-case"
+prep "$W/ctl" sbMatched 20 loose; run "$W/ctl" "BRAE_DILU_SINGLE=1 BRAE_DILU_KE=1 BRAE_DILU_HE=1 BRAE_RHOSIMPLEFOAM_MIRROR=cuda" "-case"
 diff <(lines "$W/sbMatched_s") <(lines "$W/ctl") > /dev/null \
     && say "CONTROL  a changed momentum relaxation changes the run (so the arms can fail)" FAIL \
     || say "CONTROL  a changed momentum relaxation changes the run (so the arms can fail)" ok

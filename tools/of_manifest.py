@@ -594,7 +594,22 @@ COMPONENTS = {
              selection_base="lduMatrix::solver",
              brae_existing="src/cuda/device_pcg.cu, src/cuda/device_amg_pcg.cu",
              brae_target="src/matrices/lduMatrix/solvers/",
-             note="8 keys in v2412. brae implements PCG (+AMG preconditioning) and PBiCGStab."),
+             note="8 keys in v2412. brae implements PCG (+AMG preconditioning) and PBiCGStab. "
+                  "PBiCGStab HAS TWO LOOPS AND THEY MUST AGREE: a device conditional-graph loop (4 host "
+                  "reads per solve, mailbox) and the host loop it falls back to when checkEvery > 1, "
+                  "BRAE_BICG_HOST_LOOP=1 or BRAE_NORMFACTOR_HOST=1 is set, or the graph declines. DEFECT "
+                  "FOUND AND FIXED 2026-09-12: the fallback forwarded every argument EXCEPT polyDeg, so a "
+                  "solve that took it ran the bare DIAGONAL where the caller asked for a degree-d "
+                  "truncated Neumann series -- a silent preconditioner substitution, invisible in a "
+                  "residual line because the solve still reaches the case's tolerance and only stops "
+                  "somewhere else. It surfaced when the FP-2 policy put the ENERGY solve on the series: "
+                  "normfactor_device_identity's rhoBox arm, which holds the two normFactor paths "
+                  "identical, then diverged from iteration 2 (49 of 51 lines). "
+                  "tests/bicg_polydeg_host_loop.sh holds it directly -- the same case through the graph "
+                  "loop, BRAE_BICG_HOST_LOOP=1 and BRAE_NORMFACTOR_HOST=1, every residual line and every "
+                  "written field identical, with the case's own DILU as the control that proves the "
+                  "preconditioner can move the iterate there. Fail-proof RUN: dropping polyDeg again "
+                  "turned both gates red."),
         dict(name="GAMGPreconditioner", of_symbol="Foam::GAMGPreconditioner",
              of_file="src/OpenFOAM/matrices/lduMatrix/preconditioners/GAMGPreconditioner/"
                      "GAMGPreconditioner.C",
@@ -1584,7 +1599,30 @@ COMPONENTS = {
                   "incompressible simpleFoam pEqn_cpp.cu "
                   "calls fvc::snGrad without the scheme argument and so still builds SIMPLEC's correction from "
                   "Gauss under a leastSquares grad(p). The non-orth corrections and the gradient linearUpwind NAMES are ported "
-                  "but not exercised by rhoSST (orthogonal laplacians, upwind divs)."),
+                  "but not exercised by rhoSST (orthogonal laplacians, upwind divs). "
+                  "SPEED, FP-3 (bench/rhoSimpleFoam/FASTPATH.md, 2026-09-12), all three levers "
+                  "bit-identical end to end -- a reference binary with the FP-3 files at HEAD against the "
+                  "new one wrote byte-identical fields and residual lines on injectorPipe and squareBend: "
+                  "(1) THE INVERTED dd TENSOR IS THE MESH'S, not the gradient call's. OpenFOAM builds "
+                  "leastSquaresVectors once per mesh as a MeshObject and invalidates it on a move; brae "
+                  "rebuilt it inside every call -- on gasMixing/injectorPipe at 74,650 cells that was 10 "
+                  "lsqInvDdKernel launches and 1.99 of the iteration's 15.79 GPU ms. It now lives on the "
+                  "DeviceMesh (lsqInvDdFor, dropped in refreshDeviceMeshGeometry where OF invalidates its "
+                  "MeshObject), 0.01 ms/it; BRAE_LSQ_INVDD=recompute restores the rebuild. (2) THE FUSED "
+                  "FIT, deviceLeastSquaresGradFused, up to three fields in one launch -- the least-squares "
+                  "twin of deviceGaussGradFused, held to memcmp per field by tests/test_lsq_grad_fused.cu "
+                  "(ctest lsq_grad_fused; n=1,2,3, sheared and empty-patch meshes, one-ulp "
+                  "cross-contamination controls, the cache's per-mesh control; fail-proof RUN, 10 arms "
+                  "red). Its raw form writes into caller-owned slices, so deviceLeastSquaresGradU fills "
+                  "the 9*nC grad(U) tensor in ONE launch where it took three fits, nine device-to-device "
+                  "copies and three cudaStreamSynchronize. (3) ONE GRADIENT PER (base scheme, cellLimited "
+                  "coefficient) PAIR an assembly asks for: the limitedLinear limiter, linearUpwind's "
+                  "correction and the corrected laplacian all read the case's grad(<field>) entry, so the "
+                  "energy assembly fitted grad(he) twice and each closure its own field twice. Net on "
+                  "injectorPipe: 15.79 -> 13.73 GPU ms/it, four phases 19.1 -> 17.3 ms/it wall, EEqn 3.4 "
+                  "-> 2.8 and turbulence 4.5 -> 3.6. The row's UEqn target (40 ns/cell) is NOT met at 56: "
+                  "that case names grad(U) cellLimited Gauss linear 0.99, so the momentum phase runs no "
+                  "least-squares fit at all and its cost is cellLimitGradKernel (FP-4)."),
 
         dict(name="fvm_ddt_closure", of_symbol="Foam::fv::EulerDdtScheme<Type>::fvmDdt",
              of_file="src/finiteVolume/finiteVolume/ddtSchemes/EulerDdtScheme/EulerDdtScheme.C",

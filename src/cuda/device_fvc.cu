@@ -3,6 +3,8 @@
 // bndCellStart), race-free, deterministic, matching the CPU fvc to machine precision.
 #include "device_mesh.cuh"
 #include <cuda_runtime.h>
+#include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -266,21 +268,172 @@ void deviceDiv(const DeviceMesh& dm, const DeviceBuffer<scalar>& phiInt, const D
 }
 
 
-void deviceLeastSquaresGrad(const DeviceMesh& dm, const DeviceBuffer<scalar>& vol,
-                            const DeviceBuffer<scalar>& bval,
-                            DeviceBuffer<scalar>& gx, DeviceBuffer<scalar>& gy, DeviceBuffer<scalar>& gz)
+// THE SAME FIT, N FIELDS AT A TIME, IN ONE LAUNCH (FP-3). The least-squares twin of gradFusedKernel
+// below and the same argument: fusing N independent fields is a loop interchange -- the same three
+// face loops in the same order, each field's sum in its own registers, the same expression text as
+// lsqGradKernel's so nvcc contracts the same multiply-adds -- and the shared operands (d, |Sf|/|d|^2
+// and the cell's (invDd & d) vector) are READ, never reassociated. tests/test_lsq_grad_fused.cu holds
+// every field to memcmp against lsqGradKernel, which stays as it is for exactly that purpose.
+template<int N>
+struct LsqFusedFields
 {
+    const scalar* vol[N];
+    const scalar* bval[N];
+    scalar* gx[N];
+    scalar* gy[N];
+    scalar* gz[N];
+};
+
+template<int N>
+__global__
+void lsqGradFusedKernel(
+    int nC,
+    const label* __restrict__ own,
+    const label* __restrict__ nei,
+    const label* __restrict__ ownerStart,
+    const label* __restrict__ losort,
+    const label* __restrict__ losortStart,
+    const scalar* __restrict__ w,
+    const scalar* __restrict__ magSf,
+    const scalar* __restrict__ Sfx, const scalar* __restrict__ Sfy, const scalar* __restrict__ Sfz,
+    const scalar* __restrict__ dOwnX, const scalar* __restrict__ dOwnY, const scalar* __restrict__ dOwnZ,
+    const scalar* __restrict__ dNeiX, const scalar* __restrict__ dNeiY, const scalar* __restrict__ dNeiZ,
+    const label* __restrict__ bndCellStart,
+    const label* __restrict__ bndPerm,
+    const label* __restrict__ bndIsEmpty,
+    const label* __restrict__ bndGFace,
+    const scalar* __restrict__ dBndX, const scalar* __restrict__ dBndY, const scalar* __restrict__ dBndZ,
+    const scalar* __restrict__ idd,
+    LsqFusedFields<N> fld)
+{
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    if (c >= nC) return;
+
+    const symmTensor iv{idd[0*nC+c], idd[1*nC+c], idd[2*nC+c], idd[3*nC+c], idd[4*nC+c], idd[5*nC+c]};
+    scalar vc[N];
+    vector s[N];
+#pragma unroll
+    for (int i = 0; i < N; ++i)
+    {
+        vc[i] = fld.vol[i][c];
+        s[i] = vector{0, 0, 0};
+    }
+    for (int f = ownerStart[c]; f < ownerStart[c + 1]; ++f)
+    {
+        const vector d{dOwnX[f] - dNeiX[f], dOwnY[f] - dNeiY[f], dOwnZ[f] - dNeiZ[f]};
+        const scalar msd = magSf[f] / magSqr(d);
+        const label n = nei[f];
+#pragma unroll
+        for (int i = 0; i < N; ++i)
+        {
+            s[i] += ((1.0 - w[f]) * msd * (fld.vol[i][n] - vc[i])) * (iv & d);
+        }
+    }
+    for (int k = losortStart[c]; k < losortStart[c + 1]; ++k)
+    {
+        const int f = losort[k];
+        const vector d{dOwnX[f] - dNeiX[f], dOwnY[f] - dNeiY[f], dOwnZ[f] - dNeiZ[f]};
+        const scalar msd = magSf[f] / magSqr(d);
+        const label o = own[f];
+#pragma unroll
+        for (int i = 0; i < N; ++i)
+        {
+            s[i] += (w[f] * msd * (vc[i] - fld.vol[i][o])) * (iv & d);
+        }
+    }
+    for (int k = bndCellStart[c]; k < bndCellStart[c + 1]; ++k)
+    {
+        const int bk = bndPerm[k];
+        if (bndIsEmpty[bk]) continue;
+        const int gf = bndGFace[bk];
+        const vector d = lsqBndDelta(dBndX[bk], dBndY[bk], dBndZ[bk], Sfx[gf], Sfy[gf], Sfz[gf], magSf[gf]);
+#pragma unroll
+        for (int i = 0; i < N; ++i)
+        {
+            s[i] += ((magSf[gf] / magSqr(d)) * (fld.bval[i][bk] - vc[i])) * (iv & d);
+        }
+    }
+#pragma unroll
+    for (int i = 0; i < N; ++i)
+    {
+        fld.gx[i][c] = s[i].x;
+        fld.gy[i][c] = s[i].y;
+        fld.gz[i][c] = s[i].z;
+    }
+}
+
+namespace {
+template<int N>
+void launchLsqFused(
+    const DeviceMesh& dm,
+    const scalar* const* vol,
+    const scalar* const* bval,
+    scalar* const* gx,
+    scalar* const* gy,
+    scalar* const* gz)
+{
+    LsqFusedFields<N> fld;
+    for (int i = 0; i < N; ++i)
+    {
+        fld.vol[i]  = vol[i];
+        fld.bval[i] = bval[i];
+        fld.gx[i]   = gx[i];
+        fld.gy[i]   = gy[i];
+        fld.gz[i]   = gz[i];
+    }
     const int nC = dm.nCells;
-    gx.resize(nC); gy.resize(nC); gz.resize(nC);
-    DeviceBuffer<scalar> idd; idd.resize(static_cast<std::size_t>(6) * nC);
+    lsqGradFusedKernel<N><<<nBlocks(nC), TPB>>>(
+        nC, dm.owner.data(), dm.nei.data(), dm.ownerStart.data(), dm.losort.data(), dm.losortStart.data(),
+        dm.w.data(), dm.magSf.data(),
+        dm.Sfx.data(), dm.Sfy.data(), dm.Sfz.data(),
+        dm.dOwnX.data(), dm.dOwnY.data(), dm.dOwnZ.data(),
+        dm.dNeiX.data(), dm.dNeiY.data(), dm.dNeiZ.data(),
+        dm.bndCellStart.data(), dm.bndPerm.data(), dm.bndIsEmpty.data(), dm.bndGFace.data(),
+        dm.dBndX.data(), dm.dBndY.data(), dm.dBndZ.data(), lsqInvDdFor(dm), fld);
+    cudaCheck(cudaGetLastError(), "lsqGradFused");
+}
+} // namespace
+
+
+const scalar* lsqInvDdFor(const DeviceMesh& dm)
+{
+    // The control: rebuild at every request, which is what every gradient did before FP-3.
+    static const bool recompute = []()
+    {
+        const char* e = std::getenv("BRAE_LSQ_INVDD");
+        return e && std::string(e) == "recompute";
+    }();
+    const int nC = dm.nCells;
+    const std::size_t want = static_cast<std::size_t>(6) * nC;
+    if (dm.lsqInvDd.size() == want && !recompute) return dm.lsqInvDd.data();
+    static bool announced = false;
+    if (!announced)
+    {
+        announced = true;
+        std::printf("  leastSquares: the inverted dd tensor is built once per mesh (FP-3); "
+                    "BRAE_LSQ_INVDD=recompute rebuilds it at every gradient\n");
+    }
+    dm.lsqInvDd.resize(want);
     lsqInvDdKernel<<<nBlocks(nC), TPB>>>(
         nC, dm.ownerStart.data(), dm.losort.data(), dm.losortStart.data(), dm.w.data(), dm.magSf.data(),
         dm.Sfx.data(), dm.Sfy.data(), dm.Sfz.data(),
         dm.dOwnX.data(), dm.dOwnY.data(), dm.dOwnZ.data(),
         dm.dNeiX.data(), dm.dNeiY.data(), dm.dNeiZ.data(),
         dm.bndCellStart.data(), dm.bndPerm.data(), dm.bndIsEmpty.data(), dm.bndGFace.data(),
-        dm.dBndX.data(), dm.dBndY.data(), dm.dBndZ.data(), idd.data());
+        dm.dBndX.data(), dm.dBndY.data(), dm.dBndZ.data(), dm.lsqInvDd.data());
     cudaCheck(cudaGetLastError(), "lsqInvDd");
+    return dm.lsqInvDd.data();
+}
+
+
+void deviceLeastSquaresGrad(const DeviceMesh& dm, const DeviceBuffer<scalar>& vol,
+                            const DeviceBuffer<scalar>& bval,
+                            DeviceBuffer<scalar>& gx, DeviceBuffer<scalar>& gy, DeviceBuffer<scalar>& gz)
+{
+    const int nC = dm.nCells;
+    gx.resize(nC); gy.resize(nC); gz.resize(nC);
+    // The single-field kernel stays the reference the fused one is held against; it does NOT forward
+    // to the fused path (the same reason deviceGaussGrad does not).
     lsqGradKernel<<<nBlocks(nC), TPB>>>(
         nC, dm.owner.data(), dm.nei.data(), dm.ownerStart.data(), dm.losort.data(), dm.losortStart.data(),
         dm.w.data(), dm.magSf.data(),
@@ -288,9 +441,63 @@ void deviceLeastSquaresGrad(const DeviceMesh& dm, const DeviceBuffer<scalar>& vo
         dm.dOwnX.data(), dm.dOwnY.data(), dm.dOwnZ.data(),
         dm.dNeiX.data(), dm.dNeiY.data(), dm.dNeiZ.data(), vol.data(),
         dm.bndCellStart.data(), dm.bndPerm.data(), dm.bndIsEmpty.data(), dm.bndGFace.data(),
-        dm.dBndX.data(), dm.dBndY.data(), dm.dBndZ.data(), bval.data(), idd.data(),
+        dm.dBndX.data(), dm.dBndY.data(), dm.dBndZ.data(), bval.data(), lsqInvDdFor(dm),
         gx.data(), gy.data(), gz.data());
     cudaCheck(cudaGetLastError(), "lsqGrad");
+}
+
+
+void deviceLeastSquaresGradFusedRaw(const DeviceMesh& dm, int n,
+                                    const scalar* const* vol, const scalar* const* bval,
+                                    scalar* const* gx, scalar* const* gy, scalar* const* gz)
+{
+    // Refuse rather than truncate, as deviceGaussGradFused does.
+    if (n < 1 || n > 3)
+    {
+        throw std::runtime_error("brae: deviceLeastSquaresGradFused takes 1, 2 or 3 fields, asked for "
+                                 + std::to_string(n) + ".");
+    }
+    switch (n)
+    {
+        case 1:
+            launchLsqFused<1>(dm, vol, bval, gx, gy, gz);
+            break;
+        case 2:
+            launchLsqFused<2>(dm, vol, bval, gx, gy, gz);
+            break;
+        default:
+            launchLsqFused<3>(dm, vol, bval, gx, gy, gz);
+            break;
+    }
+}
+
+
+void deviceLeastSquaresGradFused(const DeviceMesh& dm, int n,
+                                 const DeviceBuffer<scalar>* const* vol, const DeviceBuffer<scalar>* const* bval,
+                                 DeviceBuffer<scalar>* gx, DeviceBuffer<scalar>* gy, DeviceBuffer<scalar>* gz)
+{
+    if (n < 1 || n > 3)
+    {
+        throw std::runtime_error("brae: deviceLeastSquaresGradFused takes 1, 2 or 3 fields, asked for "
+                                 + std::to_string(n) + ".");
+    }
+    const scalar* v[3] = {nullptr, nullptr, nullptr};
+    const scalar* b[3] = {nullptr, nullptr, nullptr};
+    scalar* x[3] = {nullptr, nullptr, nullptr};
+    scalar* y[3] = {nullptr, nullptr, nullptr};
+    scalar* z[3] = {nullptr, nullptr, nullptr};
+    for (int i = 0; i < n; ++i)
+    {
+        gx[i].resize(dm.nCells);
+        gy[i].resize(dm.nCells);
+        gz[i].resize(dm.nCells);
+        v[i] = vol[i]->data();
+        b[i] = bval[i]->data();
+        x[i] = gx[i].data();
+        y[i] = gy[i].data();
+        z[i] = gz[i].data();
+    }
+    deviceLeastSquaresGradFusedRaw(dm, n, v, b, x, y, z);
 }
 
 

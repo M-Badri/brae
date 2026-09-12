@@ -1,5 +1,7 @@
 #include "turbulence_transport.cuh"
-#include <algorithm>   // std::max
+#include <algorithm>
+#include <memory>   // FieldGrad: one gradient per (scheme, limiter) pair an assembly asks for (FP-3)
+#include <vector>   // std::max
 #include "device_mesh.cuh"     // deviceDivUpwindCoeffs / deviceDivLimitedCoeffs / deviceLaplacian*
 #include "device_kepsilon.cuh" // deviceGaussGrad, deviceCellLimitGrad, deviceBCValue
 #include "device_blas.cuh"     // deviceAxpy
@@ -78,17 +80,55 @@ void assembleScalarTransport(
     // gradient is the field's own Gauss gradient, limited by the case's grad(<field>) cellLimited
     // coefficient when it names one; the corrected-laplacian block below builds the same three buffers
     // the same way, and this is deliberately the identical call sequence so the two cannot drift.
+    // FP-3: the field's boundary values and its gradient are evaluated ONCE per (base scheme,
+    // cellLimited coefficient) pair this assembly asks for, and every site asking for the same pair
+    // reads the same buffers. The limitedLinear limiter and the corrected laplacian both take the
+    // case's grad(<field>) entry, so on gasMixing/injectorPipe (default leastSquares) each closure
+    // fitted grad(k) and grad(epsilon) twice and evaluated the boundary values three times per field.
+    // Nothing is reassociated -- the same kernels on the same inputs, so the bits are the ones each
+    // site computed for itself -- and `field` is not written between the sites (the matrix is).
+    struct FieldGrad
+    {
+        bool leastSq = false;
+        scalar limitK = 0.0;
+        DeviceBuffer<scalar> gx, gy, gz;
+    };
+    DeviceBuffer<scalar> bval;
+    bool haveBval = false;
+    std::vector<std::unique_ptr<FieldGrad>> grads;
+    auto fieldBval = [&]() -> const DeviceBuffer<scalar>&
+    {
+        if (!haveBval)
+        {
+            if (sc.bndValues) deviceCopy(bval, *sc.bndValues);
+            else              deviceBCValue(db, field, bval);
+            haveBval = true;
+        }
+        return bval;
+    };
+    auto fieldGrad = [&](bool leastSq, scalar limitK) -> const FieldGrad&
+    {
+        for (const auto& g : grads)
+        {
+            if (g->leastSq == leastSq && g->limitK == limitK) return *g;
+        }
+        const DeviceBuffer<scalar>& bv = fieldBval();
+        auto g = std::make_unique<FieldGrad>();
+        g->leastSq = leastSq;
+        g->limitK = limitK;
+        if (leastSq) deviceLeastSquaresGrad(dm, field, bv, g->gx, g->gy, g->gz);
+        else         deviceGaussGrad(dm, field, bv, g->gx, g->gy, g->gz);
+        if (limitK > scalar(0)) deviceCellLimitGrad(dm, field, bv, g->gx, g->gy, g->gz, limitK);
+        grads.push_back(std::move(g));
+        return *grads.back();
+    };
+
     if (sc.limitedLinear)
     {
-        DeviceBuffer<scalar> bval, gx, gy, gz;
-        if (sc.bndValues) deviceCopy(bval, *sc.bndValues);
-        else              deviceBCValue(db, field, bval);
         // The limiter's gradient takes the case's OWN gradScheme for this field -- OpenFOAM builds it
         // through fvc::grad(lPhi) (LimitedScheme.C:56-59), not through a scheme the closure chooses.
-        if (sc.limGradLeastSq) deviceLeastSquaresGrad(dm, field, bval, gx, gy, gz);
-        else                   deviceGaussGrad(dm, field, bval, gx, gy, gz);
-        if (sc.limGradK > scalar(0)) deviceCellLimitGrad(dm, field, bval, gx, gy, gz, sc.limGradK);
-        deviceDivLimitedCoeffs(dm, *sc.phiInt, field, gx, gy, gz,
+        const FieldGrad& g = fieldGrad(sc.limGradLeastSq, sc.limGradK);
+        deviceDivLimitedCoeffs(dm, *sc.phiInt, field, g.gx, g.gy, g.gz,
                                scalar(2) / std::fmax(sc.limiterCoeff, scalar(1e-15)),
                                M.diag, M.upper, M.lower);
     }
@@ -105,12 +145,9 @@ void assembleScalarTransport(
     // leaves every uncoupled boundary face at zero.
     if (sc.linearUpwind)
     {
-        DeviceBuffer<scalar> bval, gx, gy, gz, lu;
-        if (sc.bndValues) deviceCopy(bval, *sc.bndValues);
-        else              deviceBCValue(db, field, bval);
-        deviceGaussGrad(dm, field, bval, gx, gy, gz);
-        if (sc.luGradK > scalar(0)) deviceCellLimitGrad(dm, field, bval, gx, gy, gz, sc.luGradK);
-        deviceLinearUpwindCorr(dm, *sc.phiInt, gx, gy, gz, lu);
+        DeviceBuffer<scalar> lu;
+        const FieldGrad& g = fieldGrad(false, sc.luGradK);
+        deviceLinearUpwindCorr(dm, *sc.phiInt, g.gx, g.gy, g.gz, lu);
         deviceAxpy(-1.0, lu, M.source);
     }
 
@@ -125,24 +162,19 @@ void assembleScalarTransport(
 
         if (sc.correctedLaplacian)
         {
-            DeviceBuffer<scalar> bval, gx, gy, gz, ffc, corr;
-            if (sc.bndValues) deviceCopy(bval, *sc.bndValues);
-            else              deviceBCValue(db, field, bval);
+            DeviceBuffer<scalar> ffc, corr;
             // correctedSnGrad's correction takes the field's OWN grad scheme (correctedSnGrad.C:52-55):
             // its base (leastSquares or Gauss linear) and its cellLimited coefficient, both from the
             // case's grad(<field>) entry. The host twin is kEpsilon_cpp.cu's laplacian block.
-            if (sc.gradFieldLeastSq) deviceLeastSquaresGrad(dm, field, bval, gx, gy, gz);
-            else                     deviceGaussGrad(dm, field, bval, gx, gy, gz);
-            if (sc.gradFieldLimitK > scalar(0))
-                deviceCellLimitGrad(dm, field, bval, gx, gy, gz, sc.gradFieldLimitK);
+            const FieldGrad& g = fieldGrad(sc.gradFieldLeastSq, sc.gradFieldLimitK);
             if (sc.snGradLimitCoeff > scalar(0.0))
             {
-                deviceLaplacianCorrFluxLimited(dm, gammaFace, field, gx, gy, gz, sc.snGradLimitCoeff, ffc);
+                deviceLaplacianCorrFluxLimited(dm, gammaFace, field, g.gx, g.gy, g.gz, sc.snGradLimitCoeff, ffc);
                 deviceFaceDivSource(dm, ffc, corr);
             }
             else
             {
-                deviceLaplacianCorr(dm, gammaFace, gx, gy, gz, corr);
+                deviceLaplacianCorr(dm, gammaFace, g.gx, g.gy, g.gz, corr);
             }
             // deviceLaplacianCorr returns -V*div(faceFluxCorr) -- already negated -- and the laplacian
             // itself enters this equation with -1, so its explicit source does too. The two signs

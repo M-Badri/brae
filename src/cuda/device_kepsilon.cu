@@ -653,19 +653,30 @@ void deviceLeastSquaresGradU(
     const int nC = dm.nCells;
     const DeviceBuffer<scalar>* Uc[3] = { &Ux, &Uy, &Uz };
     gradU.resize(static_cast<std::size_t>(9) * nC);
+    // FP-3: the three components in ONE fused fit written straight into the tensor's slices. This was
+    // three single-field fits, nine device-to-device copies and three cudaStreamSynchronize -- one per
+    // component, guarding temporaries that died at the end of each loop turn -- so the closure drained
+    // the GPU three times per gradient. Nothing here needs a sync: the boundary values live to the end
+    // of the function and the fit writes gradU itself.
+    DeviceBuffer<scalar> bval[3];
+    const scalar* vol[3];
+    const scalar* bv[3];
+    scalar* gx[3];
+    scalar* gy[3];
+    scalar* gz[3];
     for (int i = 0; i < 3; ++i)
     {
-        DeviceBuffer<scalar> bval, gx, gy, gz;
         if (UbStored && UbStored[i] && UbStored[i]->size() == static_cast<std::size_t>(dm.nBndFaces))
-            deviceCopy(bval, *UbStored[i]);
+            deviceCopy(bval[i], *UbStored[i]);
         else
-            deviceBCValue(dbU.comp[i], *Uc[i], bval);
-        deviceLeastSquaresGrad(dm, *Uc[i], bval, gx, gy, gz);
-        cudaCheck(cudaMemcpyAsync(gradU.data() + (0*3+i)*nC, gx.data(), nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread), "lsqGradU g");
-        cudaCheck(cudaMemcpyAsync(gradU.data() + (1*3+i)*nC, gy.data(), nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread), "lsqGradU g");
-        cudaCheck(cudaMemcpyAsync(gradU.data() + (2*3+i)*nC, gz.data(), nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread), "lsqGradU g");
-        cudaCheck(cudaStreamSynchronize(cudaStreamPerThread), "lsqGradU sync");   // gx/gy/gz die at the end of this iteration
+            deviceBCValue(dbU.comp[i], *Uc[i], bval[i]);
+        vol[i] = Uc[i]->data();
+        bv[i]  = bval[i].data();
+        gx[i]  = gradU.data() + (0*3+i)*nC;
+        gy[i]  = gradU.data() + (1*3+i)*nC;
+        gz[i]  = gradU.data() + (2*3+i)*nC;
     }
+    deviceLeastSquaresGradFusedRaw(dm, 3, vol, bv, gx, gy, gz);
 }
 void deviceGByNuFromGradU(const DeviceBuffer<scalar>& gradU, int nC, DeviceBuffer<scalar>& gByNu)
 {

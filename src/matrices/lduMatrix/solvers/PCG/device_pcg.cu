@@ -642,8 +642,16 @@ DeviceSolverPerf deviceJacobiBiCGStab(
         if (deviceJacobiBiCGStabGraph(A, b, psi, dNormFactor, tol, relTol, maxIter, minIter, precon, amg, polyDeg, gp)) return gp;
     }
 #endif
-    // the host loop needs the number on the host: one read, on this path only
-    return deviceJacobiBiCGStab(A, b, psi, deviceReadScalar(dNormFactor), tol, relTol, maxIter, checkEvery, minIter, precon, amg);
+    // the host loop needs the number on the host: one read, on this path only.
+    // polyDeg IS FORWARDED. It was not until 2026-09-12, so every solve that fell back here -- a
+    // checkEvery above 1, BRAE_BICG_HOST_LOOP, BRAE_NORMFACTOR_HOST, or the graph path declining --
+    // silently ran the DIAGONAL where the caller asked for a degree-d truncated Neumann series. That is
+    // the quiet substitution this project keeps finding, and it is invisible in a residual line: the
+    // solve still reaches the same tolerance, it just stops somewhere else. Found by
+    // normfactor_device_identity's rhoBox arm once the FP-2 policy put the energy solve on the series
+    // (the two normFactor paths then disagreed from iteration 2); tests/bicg_polydeg_host_loop.sh holds
+    // it directly.
+    return deviceJacobiBiCGStab(A, b, psi, deviceReadScalar(dNormFactor), tol, relTol, maxIter, checkEvery, minIter, precon, amg, polyDeg);
 }
 
 } // namespace brae

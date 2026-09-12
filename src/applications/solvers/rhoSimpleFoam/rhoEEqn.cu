@@ -5,6 +5,8 @@
 #include "device_blas.cuh"
 #include "device_simple.cuh"
 #include <cuda_runtime.h>
+#include <vector>
+#include <memory>   // HeGrad: one gradient per (scheme, limiter) pair the assembly asks for (FP-3)
 #include <stdexcept>
 
 namespace brae {
@@ -291,15 +293,52 @@ void assembleEEqn(
     // reference keeps it too (rhoEEqn_cpp.cu:41-56, one guard on okKE && okHe).
     // limitedLinear replaces the upwind coefficients rather than adding to the source -- it is a weight
     // change, not a deferred correction. Same call sequence as the turbulence closure's assembleTransport.
+    // FP-3: he's boundary values and its gradient evaluated ONCE per (base scheme, cellLimited
+    // coefficient) pair the assembly asks for -- the limitedLinear limiter, linearUpwind's correction
+    // and the corrected laplacian each rebuilt them (three boundary evaluations and two identical
+    // least-squares fits per iteration on gasMixing/injectorPipe). Same kernels on the same inputs,
+    // so the same bits; he is not written between the sites. The turbulence transport assembly
+    // (turbulence_transport.cu) carries the same shape.
+    struct HeGrad
+    {
+        bool leastSq = false;
+        scalar limitK = 0.0;
+        DeviceBuffer<scalar> gx, gy, gz;
+    };
+    DeviceBuffer<scalar> hbShared;
+    bool haveHb = false;
+    std::vector<std::unique_ptr<HeGrad>> heGrads;
+    auto heBval = [&]() -> const DeviceBuffer<scalar>&
+    {
+        if (!haveHb)
+        {
+            if (in.heBndValues) deviceCopy(hbShared, *in.heBndValues);
+            else                deviceBCValue(dbHe, he, hbShared);
+            haveHb = true;
+        }
+        return hbShared;
+    };
+    auto heGrad = [&](bool leastSq, scalar limitK) -> const HeGrad&
+    {
+        for (const auto& g : heGrads)
+        {
+            if (g->leastSq == leastSq && g->limitK == limitK) return *g;
+        }
+        const DeviceBuffer<scalar>& hb = heBval();
+        auto g = std::make_unique<HeGrad>();
+        g->leastSq = leastSq;
+        g->limitK = limitK;
+        if (leastSq) deviceLeastSquaresGrad(dm, he, hb, g->gx, g->gy, g->gz);
+        else         deviceGaussGrad(dm, he, hb, g->gx, g->gy, g->gz);
+        if (limitK > scalar(0)) deviceCellLimitGrad(dm, he, hb, g->gx, g->gy, g->gz, limitK);
+        heGrads.push_back(std::move(g));
+        return *heGrads.back();
+    };
+
     if (in.schemeHe == cpu::rhoSimple::DivScheme::limitedLinear)
     {
-        DeviceBuffer<scalar> hb, gx, gy, gz;
-        if (in.heBndValues) deviceCopy(hb, *in.heBndValues);
-        else                deviceBCValue(dbHe, he, hb);
-        if (in.limGradHeLeastSq) deviceLeastSquaresGrad(dm, he, hb, gx, gy, gz);
-        else                     deviceGaussGrad(dm, he, hb, gx, gy, gz);
-        if (in.limGradHeK > scalar(0)) deviceCellLimitGrad(dm, he, hb, gx, gy, gz, in.limGradHeK);
-        deviceDivLimitedCoeffs(dm, *in.phiInt, he, gx, gy, gz,
+        const HeGrad& g = heGrad(in.limGradHeLeastSq, in.limGradHeK);
+        deviceDivLimitedCoeffs(dm, *in.phiInt, he, g.gx, g.gy, g.gz,
                                scalar(2) / std::fmax(in.schemeCoeffHe, scalar(1e-15)),
                                E.diag, E.upper, E.lower);
     }
@@ -314,12 +353,9 @@ void assembleEEqn(
     // scheme lives in the source, which is what OpenFOAM does.
     if (in.schemeHe == cpu::rhoSimple::DivScheme::linearUpwind)
     {
-        DeviceBuffer<scalar> hb, gx, gy, gz, corr;
-        if (in.heBndValues) deviceCopy(hb, *in.heBndValues);
-        else                deviceBCValue(dbHe, he, hb);
-        deviceGaussGrad(dm, he, hb, gx, gy, gz);
-        if (in.gradHeLimitK > 0.0) deviceCellLimitGrad(dm, he, hb, gx, gy, gz, in.gradHeLimitK);
-        deviceLinearUpwindCorr(dm, *in.phiInt, gx, gy, gz, corr);
+        DeviceBuffer<scalar> corr;
+        const HeGrad& g = heGrad(false, in.gradHeLimitK);
+        deviceLinearUpwindCorr(dm, *in.phiInt, g.gx, g.gy, g.gz, corr);
         deviceAxpy(-1.0, corr, E.source);
     }
 
@@ -358,27 +394,23 @@ void assembleEEqn(
 
         if (in.correctedLaplacian)
         {
-            DeviceBuffer<scalar> hb, gx, gy, gz, lc;
-            if (in.heBndValues) deviceCopy(hb, *in.heBndValues);
-            else                deviceBCValue(dbHe, he, hb);
+            DeviceBuffer<scalar> lc;
             // correctedSnGrad's correction takes grad(he)'s OWN gradSchemes entry (correctedSnGrad.C:
             // 52-55): its base and its cellLimited coefficient -- the same two the limitedLinear limiter
             // resolves (limGradHeLeastSq / limGradHeK), as rhoEEqn_cpp.cu's limiterGrad takes them. This
             // built the correction from an unlimited Gauss gradient whatever the case said; measured on
             // gasMixing/injectorPipe (default leastSquares, snappyHexMesh) the host read T 8.6e-07 off
             // OpenFOAM at a developed restart with that defect and 9.6e-13 without it.
-            if (in.limGradHeLeastSq) deviceLeastSquaresGrad(dm, he, hb, gx, gy, gz);
-            else                     deviceGaussGrad(dm, he, hb, gx, gy, gz);
-            if (in.limGradHeK > 0.0) deviceCellLimitGrad(dm, he, hb, gx, gy, gz, in.limGradHeK);
+            const HeGrad& g = heGrad(in.limGradHeLeastSq, in.limGradHeK);
             if (in.snGradLimitCoeff > 0.0)
             {
                 DeviceBuffer<scalar> ffcL;
-                deviceLaplacianCorrFluxLimited(dm, gammaf, he, gx, gy, gz, in.snGradLimitCoeff, ffcL);
+                deviceLaplacianCorrFluxLimited(dm, gammaf, he, g.gx, g.gy, g.gz, in.snGradLimitCoeff, ffcL);
                 deviceFaceDivSource(dm, ffcL, lc);
             }
             else
             {
-                deviceLaplacianCorr(dm, gammaf, gx, gy, gz, lc);
+                deviceLaplacianCorr(dm, gammaf, g.gx, g.gy, g.gz, lc);
             }
             // The laplacian enters with -1, so its explicit source does too.
             deviceAxpy(-1.0, lc, E.source);

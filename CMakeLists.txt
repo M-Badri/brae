@@ -1195,6 +1195,12 @@ add_test(NAME bicg_device_loop_identity
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/bicg_device_loop_identity.sh)
 set_tests_properties(bicg_device_loop_identity PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+# The series must survive the host-loop fallback too: polyDeg was not forwarded there until 2026-09-12,
+# so a solve that fell back ran the bare diagonal where the caller asked for a degree-d Neumann series.
+add_test(NAME bicg_polydeg_host_loop
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/bicg_polydeg_host_loop.sh)
+set_tests_properties(bicg_polydeg_host_loop PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
 add_test(NAME gs_fused_identity
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/gs_fused_identity.sh)
 set_tests_properties(gs_fused_identity PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
@@ -2554,7 +2560,10 @@ set_tests_properties(rho_run_to_run_identity PROPERTIES SKIP_RETURN_CODE 77 LABE
 # on the aerofoil at the tutorial's own relTol, with the health (bounding) and the speed asserted.
 add_test(NAME rho_dilu_entry_policy_vs_openfoam
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_dilu_entry_policy_vs_openfoam.sh)
-set_tests_properties(rho_dilu_entry_policy_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200)
+# RUN_SERIAL: ARM 3 times the turbulence phase, and a GPU shared with two other gates inflates both
+# arms into noise (measured under `ctest -j 3`: 10.3 against 10.4 ms/it, where alone it reads 3.4
+# against 1.9).
+set_tests_properties(rho_dilu_entry_policy_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1200 RUN_SERIAL TRUE)
 
 # rhoSimpleFoam's UEqn.H against OpenFOAM's own assembled momentum matrix (tools/dumpPEqn stage harness:
 # rAU, internalCoeffs, boundaryCoeffs). OpenFOAM's muEff is injected so this measures the ASSEMBLY and not
@@ -3086,6 +3095,12 @@ add_executable(test_grad_fused tests/test_grad_fused.cu)
 target_include_directories(test_grad_fused PRIVATE ${BRAE_HEADER_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_link_libraries(test_grad_fused PRIVATE brae_core)
 add_test(NAME grad_fused COMMAND test_grad_fused)
+
+# FP-3: the same, for the leastSquares fit -- plus the inverted dd tensor cached on the mesh.
+add_executable(test_lsq_grad_fused tests/test_lsq_grad_fused.cu)
+target_include_directories(test_lsq_grad_fused PRIVATE ${BRAE_HEADER_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_link_libraries(test_lsq_grad_fused PRIVATE brae_core)
+add_test(NAME lsq_grad_fused COMMAND test_lsq_grad_fused)
 
 # AMG as the preconditioner of the ASYMMETRIC BiCGStab (OpenFOAM's `solver PBiCGStab; preconditioner GAMG`):
 # the answer must not depend on the preconditioner, it must take fewer iterations, and the coarsest solve --
