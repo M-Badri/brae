@@ -494,3 +494,67 @@ face-gather traffic, not brae's packaging of it. The row's target is not met and
 list will meet it. What is still on the table for this case is elsewhere: the pressure phase is 6.35 of
 the iteration's 13.6 GPU ms (FP-12), and the leastSquares fits of the scalar fields are 1.51 in seven
 single-field launches that no site can group.
+
+## Where every tutorial stands after FP-1 to FP-4 (2026-09-13)
+
+100 iterations, `BRAE_PHASE_TIME=1`, the tutorials as they ship. The OpenFOAM-20-core figures are the
+recorded ones from the campaign table above; OpenFOAM has not changed.
+
+| tutorial                     | UEqn | EEqn | pEqn | turb | four phases | OF-20c ms/it |
+|------------------------------|-----:|-----:|-----:|-----:|------------:|-------------:|
+| aerofoilNACA0012             |  1.1 |  1.3 |  3.9 |  1.7 |         8.1 |            8 |
+| angledDuctExplicitFixedCoeff |  2.0 |  0.9 |  2.6 |  1.3 |         6.7 |            7 |
+| squareBend                   |  3.2 |  2.2 |  8.6 |  4.1 |        18.2 |           32 |
+| squareBendLiq                |  3.7 |  5.8 |  7.8 |  4.0 |        21.2 |           23 |
+| squareBendLiqNoNewtonian     |  3.7 |  3.3 |  8.4 |  0.9 |        16.2 |           24 |
+| injectorPipe                 |  4.2 |  2.9 |  6.5 |  3.7 |        17.2 |           20 |
+
+The pressure equation is the largest phase on every one of them, 37% to 52% of the four, and the solve
+inside it is 1.4 to 5.7 ms per iteration. That is why FP-12 is the next row and not squareBendLiq's
+energy phase, which is larger in one place (5.8 against squareBend's 2.2) but only in one place.
+
+## FP-12, first findings: the V-cycle is 95% overhead, and the two obvious dials make it worse (2026-09-13)
+
+gasMixing/injectorPipe, 74,650 cells, 11 levels, about 15 V-cycles per iteration (one pressure solve,
+15 PCG iterations at the case's relTol 0.05). nsys with `--cuda-graph-trace=node` and NVTX phases: the
+pressure phase is 1,814 launches and 6.57 GPU ms, so 121 kernels per V-cycle, and every one of them is
+already inside a CUDA graph. The FP32 SpMV is 2.60 ms of it:
+
+| level (cells) | SpMV us per launch | elementwise kernel on the same grid |
+|---------------|-------------------:|------------------------------------:|
+| 74,650        |              10.05 |                        1.09 (zeroT) |
+| 2,304         |               5.51 |                                0.77 |
+| under 1,000   |               4.20 |                                0.76 |
+
+The finest level is 32 times larger than the 2,300-cell one and only 1.8 times slower, and the coarse
+SpMV costs five times what an elementwise kernel costs on the same grid. The V-cycle's arithmetic is
+trivial -- three fine-level SpMVs move about 6 MB, some 12 us at this GPU's bandwidth, against 290 us
+of measured cycle. It is a per-kernel floor multiplied by 121.
+
+FOUR LEVERS MEASURED, three of them rejected:
+
+- Coarsest size (the row's first lever). Sweeping `BRAE_AMG_TARGET` over 32, 100, 200, 500, 1000, 2000
+  and 5000: injectorPipe's p solve reads 4.5, 4.2, 5.8, 8.4, 12.7, 23.9, 34.7 ms/it and squareBend's
+  6.2, 5.6, 11.4, 32.6, 74.8, 77.6, 56.3. The default of 64 is right and the direct coarse solve is
+  what punishes a bigger coarsest level. Fewer levels is not the way out.
+- Launch shape. At 256 threads a 1,000-cell level is four blocks, so four multiprocessors do the work.
+  Sizing the block to the level (32/64/128 by cell count) is bit-identical -- same thread-per-cell
+  arithmetic, same sum order -- and was measured: SpMV 2.602 to 2.533 ms on injectorPipe, and nothing
+  on squareBend (pEqn 8.6 to 8.6-8.9). Reverted; the measurement is in the comment where the next
+  person will look.
+- The Gauss-Seidel smoother (`BRAE_AMG_GS`): injectorPipe's p solve 4.4 to 13.0 ms/it. Three times
+  worse.
+- Smoothed aggregation (`BRAE_AMG_SA`), which the row named: the SOLVE gets 25% faster, 4.4 to 3.3
+  ms/it, and the phase gets worse, 7.1 to 12.8, because its RAP setup runs on every SIMPLE iteration.
+  It also scatters with atomics, so it is not deterministic (the D-1 class of defect), and squareBend
+  diverges under it. Not a default as it stands. What it does say is that a better prolongation is
+  worth 25% of the solve IF its setup can be hoisted off the per-iteration path.
+
+For reference on the same case, the FP32 V-cycle that is already the default is worth 0.8 ms/it
+(`BRAE_AMG_FP32=0` reads p solve 5.2 against 4.4).
+
+THE LEVER THIS ROW POINTS AT, with its prize measured: fuse the coarse hierarchy into ONE kernel, the
+way `device_dilu.cu` walks its levels in a single block. The levels at or below 4,096 cells contribute
+1.24 ms of SpMV, roughly 0.5 ms of smoother, restriction, prolongation, residual and zeroing, and the
+0.55 ms coarse LU solve -- about 2.3 of the phase's 6.6 ms per iteration, in kernels that would become
+one launch per cycle instead of about 80.

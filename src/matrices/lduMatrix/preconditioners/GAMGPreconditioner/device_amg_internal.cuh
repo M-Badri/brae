@@ -97,6 +97,16 @@ void amulFK(int nC, const float* __restrict__ diag, const float* __restrict__ up
     }
     Apsi[c]=s;
 }
+// FP-12 MEASURED THE LAUNCH SHAPE AND IT IS NOT THE CONSTRAINT. This SpMV is 451 launches and 2.60 of
+// the pressure phase's 6.57 GPU ms on gasMixing/injectorPipe (74,650 cells, 11 levels, ~15 V-cycles per
+// iteration), and it does not get cheaper as the levels shrink: 10.05 us at the finest grid, 5.4 on a
+// 2,300-cell level, 4.2 below 1,000 cells -- where zeroT and residualT on the SAME grids take 0.8. At
+// 256 threads a 1,000-cell level is four blocks, so sizing the block to the level (32/64/128 by cell
+// count, bit-identical: same thread-per-cell arithmetic, same sum order) was tried and measured:
+// 2.602 -> 2.533 ms on injectorPipe and nothing at all on squareBend (pEqn 8.6 -> 8.6-8.9, p solve 5.7
+// -> 5.7-5.8). Reverted. The cost is the per-kernel floor times 121 kernels per V-cycle, and the lever
+// that addresses that is fusing the coarse hierarchy into one kernel, the way device_dilu.cu walks its
+// levels in a single block.
 inline void amulF(const LduF& A, const float* x, float* y)
 {
     amulFK<<<nBlocks(A.nCells),TPB>>>(A.nCells, A.diag, A.upper, A.lower, A.nei, A.owner,

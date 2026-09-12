@@ -676,7 +676,27 @@ COMPONENTS = {
              brae_target="src/matrices/lduMatrix/solvers/GAMG/",
              note="pitzDaily and motorBike BOTH select `GAMG` for p. brae substitutes AMG-preconditioned "
                   "PCG. That is a different algorithm with a different iteration count -- the solver must "
-                  "say so, not silently substitute."),
+                  "say so, not silently substitute. SPEED, FP-12 (bench/rhoSimpleFoam/FASTPATH.md, "
+                  "2026-09-13): the pressure equation is the largest phase of every rhoSimpleFoam "
+                  "tutorial, 37-52% of the four, and the V-cycle is ~95% overhead rather than "
+                  "arithmetic. On gasMixing/injectorPipe (74,650 cells, 11 levels, ~15 V-cycles per "
+                  "iteration) the phase is 1,814 launches and 6.57 GPU ms -- 121 kernels per cycle, all "
+                  "already inside a CUDA graph -- while three fine-level SpMVs move about 6 MB, some 12 "
+                  "us of bandwidth against 290 us of measured cycle. The FP32 SpMV costs 4.2 us on "
+                  "levels under 1,000 cells where an elementwise kernel on the same grid costs 0.76. "
+                  "MEASURED AND REJECTED: a bigger coarsest level (BRAE_AMG_TARGET 32/100/200/500/1k/2k/"
+                  "5k gives p solve 4.5/4.2/5.8/8.4/12.7/23.9/34.7 ms/it on injectorPipe and "
+                  "6.2/5.6/11.4/32.6/74.8/77.6/56.3 on squareBend -- the dense coarse LU punishes it); a "
+                  "block sized to the level (bit-identical, 2.602 -> 2.533 ms SpMV on one case and "
+                  "nothing on the other, reverted); the Gauss-Seidel smoother (BRAE_AMG_GS: p solve 4.4 "
+                  "-> 13.0); and smoothed aggregation (BRAE_AMG_SA: the solve 4.4 -> 3.3 but the phase "
+                  "7.1 -> 12.8, since its RAP setup runs every SIMPLE iteration -- and it scatters with "
+                  "atomics, so it is not run-to-run deterministic, and squareBend diverges under it). "
+                  "The FP32 V-cycle that is already the default is worth 0.8 ms/it. What the row points "
+                  "at next, with the prize measured: fuse the coarse hierarchy into ONE kernel the way "
+                  "device_dilu.cu walks its levels in a single block -- the levels at or below 4,096 "
+                  "cells are about 2.3 of the phase's 6.6 ms per iteration in some 80 launches per "
+                  "cycle."),
 
         dict(name="dispatch", of_symbol="controlDict application",
              of_file="applications/solvers/incompressible/simpleFoam/simpleFoam.C",
