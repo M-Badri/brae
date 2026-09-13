@@ -3,6 +3,8 @@
 // slip/symmetry, totalPressure, and the HbyA constraints at slip/mixed faces. Split from device_boundary.cu
 // (the BC matrix/flux contributions are in device_boundary_assembly.cu). Shared decls: device_boundary.cuh.
 #include "device_boundary.cuh"
+#include "device_blas.cuh"   // deviceDotInto / deviceSumMagInto: FP-9 keeps the inlet reduction on the device
+#include <map>
 #include <cuda_runtime.h>
 
 namespace brae {
@@ -355,6 +357,86 @@ void frUpdateKernel(
     refZ[i] = avgU * nz[i];
     if (valX) { valX[i] = refX[i]; valY[i] = refY[i]; valZ[i] = refZ[i]; }
 }
+
+// FP-9: THE SAME UPDATE WITH avgU ON THE DEVICE.
+//
+// avgU is -flowRate/gSum(rho*magSf), and the sum is a reduction. Reading it to the host to pass it as
+// a kernel argument costs a blocking copy per inlet patch per iteration -- measured on squareBend as
+// one gap of 463 us between the reduction and this kernel, with the GPU idle across it. Nothing here
+// needs the number on the host: the reduction writes a device scalar, a one-thread kernel turns it
+// into avgU, and this kernel reads it. Slot 1 carries the validity OpenFOAM's `continue` expressed:
+// a non-positive sum leaves the patch untouched rather than writing zeros into it.
+__global__
+void frAvgUKernel(scalar mdot, const scalar* __restrict__ sum, scalar* __restrict__ out)
+{
+    if (threadIdx.x || blockIdx.x) return;
+    const scalar s = *sum;
+    out[0] = (s > scalar(0)) ? (-mdot / s) : scalar(0);
+    out[1] = (s > scalar(0)) ? scalar(1) : scalar(0);
+}
+
+__global__
+void frUpdateDevKernel(
+    int n,
+    const scalar* __restrict__ mask,
+    const scalar* __restrict__ avgU,      // [0] the value, [1] non-zero when the sum was positive
+    const scalar* __restrict__ nx,
+    const scalar* __restrict__ ny,
+    const scalar* __restrict__ nz,
+    scalar* __restrict__ refX,
+    scalar* __restrict__ refY,
+    scalar* __restrict__ refZ,
+    scalar* __restrict__ valX,
+    scalar* __restrict__ valY,
+    scalar* __restrict__ valZ)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n || mask[i] <= scalar(0) || avgU[1] == scalar(0)) return;
+    const scalar a = avgU[0];
+    refX[i] = a * nx[i];
+    refY[i] = a * ny[i];
+    refZ[i] = a * nz[i];
+    if (valX) { valX[i] = refX[i]; valY[i] = refY[i]; valZ[i] = refZ[i]; }
+}
+
+
+void deviceUpdateFlowRateInletDev(
+    DeviceVectorBoundary& dbU,
+    const DeviceBuffer<scalar>& maskMagSf,
+    scalar mdot,
+    bool isMass,
+    const DeviceBuffer<scalar>& rhoBnd,
+    const DeviceBuffer<scalar>& nx,
+    const DeviceBuffer<scalar>& ny,
+    const DeviceBuffer<scalar>& nz,
+    DeviceBuffer<scalar>* UxBnd,
+    DeviceBuffer<scalar>* UyBnd,
+    DeviceBuffer<scalar>* UzBnd)
+{
+    const int n = dbU.comp[0].n;
+    if (n == 0) return;
+    // Per patch, kept: the two scalars this needs on the device, and the reduction's own slot.
+    static auto& cache = *new std::map<const void*, DeviceBuffer<scalar>>();
+    DeviceBuffer<scalar>& w = cache[static_cast<const void*>(&maskMagSf)];
+    w.resize(3);                                   // [0] sum, [1] avgU, [2] valid
+    if (isMass) deviceDotInto(rhoBnd, maskMagSf, w.data());
+    else        deviceSumMagInto(maskMagSf, w.data());
+    frAvgUKernel<<<1, 32>>>(mdot, w.data(), w.data() + 1);
+    cudaCheck(cudaGetLastError(), "frAvgU");
+    const bool haveVal = UxBnd && UyBnd && UzBnd
+                      && static_cast<int>(UxBnd->size()) == n
+                      && static_cast<int>(UyBnd->size()) == n
+                      && static_cast<int>(UzBnd->size()) == n;
+    frUpdateDevKernel<<<nBlocks(n), TPB>>>(n, maskMagSf.data(), w.data() + 1, nx.data(), ny.data(), nz.data(),
+                                           dbU.comp[0].refValue.data(),
+                                           dbU.comp[1].refValue.data(),
+                                           dbU.comp[2].refValue.data(),
+                                           haveVal ? UxBnd->data() : nullptr,
+                                           haveVal ? UyBnd->data() : nullptr,
+                                           haveVal ? UzBnd->data() : nullptr);
+    cudaCheck(cudaGetLastError(), "frUpdateDev");
+}
+
 
 void deviceUpdateFlowRateInlet(
     DeviceVectorBoundary& dbU,

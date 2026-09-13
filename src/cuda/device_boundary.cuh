@@ -319,6 +319,16 @@ void deviceUpdateFlowRateInlet(DeviceVectorBoundary& dbU, const DeviceBuffer<sca
                                DeviceBuffer<scalar>* UxBnd = nullptr,
                                DeviceBuffer<scalar>* UyBnd = nullptr,
                                DeviceBuffer<scalar>* UzBnd = nullptr);
+// FP-9: the same update with the reduction kept on the DEVICE -- gSum(rho*magSf) into a device scalar,
+// avgU formed there, and the patch kernel reading it. The host-scalar form above costs a blocking copy
+// per inlet patch per iteration (measured: one 463 us gap on squareBend, the GPU idle across it).
+void deviceUpdateFlowRateInletDev(DeviceVectorBoundary& dbU, const DeviceBuffer<scalar>& maskMagSf,
+                                  scalar mdot, bool isMass, const DeviceBuffer<scalar>& rhoBnd,
+                                  const DeviceBuffer<scalar>& nx, const DeviceBuffer<scalar>& ny,
+                                  const DeviceBuffer<scalar>& nz,
+                                  DeviceBuffer<scalar>* UxBnd = nullptr,
+                                  DeviceBuffer<scalar>* UyBnd = nullptr,
+                                  DeviceBuffer<scalar>* UzBnd = nullptr);
 
 // patchInternalField for every boundary face (out[i] = cellField[faceCell[i]]), for BCs whose value is a
 // patch-wide functional of the adjacent cells -- fixedMean is one.

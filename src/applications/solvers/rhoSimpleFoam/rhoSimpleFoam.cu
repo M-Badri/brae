@@ -346,14 +346,16 @@ static void updateFlowRateInlets(
         // OF's divisor: gSum(rho*magSf) for a mass rate, gSum(magSf) for a volumetric one
         // (flowRateInletVelocityFvPatchVectorField.C:201-237 -- the volumetric branch passes one{}).
         const bool isMass = !in.frIsMass || k >= in.frIsMass->size() || (*in.frIsMass)[k] != 0;
-        // deviceSumMag, not a plain sum: the mask holds magSf on the patch and 0 elsewhere, both
-        // non-negative, so |.| is the identity here and there is no separate sum reduction to add.
-        const scalar sumRhoA = isMass ? deviceDot(f.rhoBnd, (*in.frMagSf)[k])
-                                      : deviceSumMag((*in.frMagSf)[k]);
-        if (sumRhoA <= scalar(0)) continue;
-        deviceUpdateFlowRateInlet(dbU, (*in.frMagSf)[k], -(*in.frMdot)[k] / sumRhoA,
-                                  *in.frNx, *in.frNy, *in.frNz,
-                                  &f.UxBnd, &f.UyBnd, &f.UzBnd);
+        // FP-9: the divisor stays on the DEVICE. deviceSumMag, not a plain sum, for the volumetric
+        // branch: the mask holds magSf on the patch and 0 elsewhere, both non-negative, so |.| is the
+        // identity here and there is no separate sum reduction to add. The non-positive case still
+        // leaves the patch untouched -- OpenFOAM's `continue` -- which the update carries in its second
+        // slot rather than in a host branch, because a host branch needs the number here and that read
+        // is the whole cost: one blocking copy per inlet patch per iteration, measured on squareBend as
+        // a 463 us gap between the reduction and the patch kernel with the GPU idle across it.
+        deviceUpdateFlowRateInletDev(dbU, (*in.frMagSf)[k], (*in.frMdot)[k], isMass, f.rhoBnd,
+                                     *in.frNx, *in.frNy, *in.frNz,
+                                     &f.UxBnd, &f.UyBnd, &f.UzBnd);
     }
 }
 

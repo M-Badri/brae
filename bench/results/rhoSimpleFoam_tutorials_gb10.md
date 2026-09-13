@@ -875,3 +875,45 @@ Gates: 15 of 16 pass, including `rho_patch_expression_vs_openfoam` at its 1e-12 
 `rho_squarebendliq`, `liquid_thermo`, `liquid_inversion`, `energy_bc`, `limit_temperature`,
 `rho_tutorials`, `rho_simple_end_to_end` and run-to-run identity. The one failure, `liquid_correct`, is
 one of the nine that fail identically at HEAD.
+
+## FP-9: the inlet's reduction, and the first drain removal that moved the clock (2026-09-13)
+
+`flowRateInletVelocity` sets U on the patch to -flowRate/gSum(rho*magSf) times the face normal. The sum
+is a reduction, and brae read it to the host to pass avgU as a kernel argument -- one blocking copy per
+inlet patch per iteration, measured on squareBend as a 463 us gap between the reduction and the patch
+kernel with the GPU idle across it.
+
+It now stays on the device: the reduction writes a device scalar, a one-thread kernel forms avgU beside
+it, and the patch kernel reads it. OpenFOAM's `continue` on a non-positive sum -- which leaves the
+patch untouched rather than writing zeros -- is carried in a second slot next to avgU, because a host
+branch would need the number here and that read is the whole cost. The host-scalar entry point stays
+for the incompressible callers.
+
+| squareBend, 200 iterations | before | after |
+|----------------------------|-------:|------:|
+| wall                       | 4.42 / 4.44 / 4.52 s | 4.11 / 4.06 / 4.18 s |
+| blocking copies per iteration |  49.6 |  30.6 |
+| kernels per iteration      |  1,334 | 1,336 |
+| GPU ms per iteration       |  11.06 | 11.02 |
+
+THIS ONE MOVED THE CLOCK -- about 1.7 ms per iteration, 8% -- where the five drain removals before it
+did not, and the difference is worth stating. Those sat where the host had to wait for queued work
+anyway. This one sits between a reduction and the kernel that consumes it, in the middle of the
+boundary update, so the stall was pure: the GPU had nothing else to run. Note also that the API time of
+the remaining copies went UP (7.04 to 8.17 ms per iteration) while their count fell by 19: with fewer
+stall points the host waits longer at each, which is what better overlap looks like from the API's
+side.
+
+The five `cudaDeviceSynchronize` calls per iteration in the earlier tables were `BRAE_PHASE_TIME`'s own
+phase boundaries: this profile, taken without it, shows zero.
+
+Ten gates pass, including `rho_flowrate_inlet_vs_openfoam`, `flowrate_device_solver_vs_openfoam`,
+squareBend, squareBendLiq, the tutorials, the coded Function1 and run-to-run identity.
+
+Where the three cases now stand, 200 iterations each, wall including prep:
+
+| case          | before this campaign's last three rows | now |
+|---------------|--------------------------------------:|----:|
+| squareBend    | 4.44 s | 4.12 s |
+| squareBendLiq | 4.50 s | 4.25 s |
+| injectorPipe  | 3.75 s | 3.38 s |
