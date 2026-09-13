@@ -1138,3 +1138,54 @@ measurements say TAU = 0.25 (degree 14 at alpha = 0.9, 4 instead of 7 at 0.7) pr
 answer on the case where the cost is real, preserves the case the rule was written for, and is worth
 about 10 ms per iteration at 896,000 cells. What it would cost is the factor-of-ten margin on cases
 nobody has run, which is exactly what the current constant buys. Recorded for the decision; not made.
+
+## FP-11: the constant changed, and a gate chose the value (2026-09-13)
+
+The series' truncation target is now 0.15 where it was 0.1. At a relaxation factor of 0.9 that derives
+degree 19 instead of 22; at 0.8, 9 instead of 11; at 0.7, 6 instead of 7.
+
+THE CONVERGED COMPARISON WOULD HAVE ALLOWED 0.25, and a gate said no, which is the part worth keeping.
+`turb_precon_vs_openfoam` holds brae's k, epsilon and nut EXTREMES against OpenFOAM's at outer
+iteration 12 -- a transient health check, not a converged one -- and at 0.25 (degree 14 at alpha 0.9)
+nut's minimum reads 6.54e-05 against its 7.01e-05 bound. Swept on that fixture:
+
+| degree | nut min at iteration 12 | bound 7.009e-05 |
+|--------|------------------------:|-----------------|
+| 22     |                1.98e-04 | ok              |
+| 20     |                2.04e-04 | ok              |
+| 18     |                2.84e-04 | ok              |
+| 16     |                1.96e-04 | ok              |
+| 14     |                6.54e-05 | OUT             |
+
+So the comfortable threshold is nearer alpha^d = 0.19 than the 0.35 the old failure table suggested,
+and 0.15 sits below it with margin: three degrees above the last one measured good, five above the
+first measured bad. The bound was not touched.
+
+What it buys, squareBend at 896,000 cells: the turbulence block 49.0 to 45.3 ms per iteration and the
+four phases 171.8 to 163.5, about 5%. What it does not change is the answer -- the converged comparison
+above found degrees 22, 16, 12 and 8 landing within 7.1e-08 of OpenFOAM's velocity field, unordered in
+the degree.
+
+Sixteen gates pass at the new constant: the three the row named, the two DILU-entry ones, the
+sbMatched and gradp assembly gates that pin DILU, the single-block DILU walk, the normFactor identity,
+determinism, run-to-run identity, squareBend, the tutorials and the end-to-end case. Every gate that
+names a derived degree in its text was updated to the number the rule now derives, which is what makes
+them assert the RULE rather than a constant.
+
+## FP-5: the old-time copies, measured and closed (2026-09-13)
+
+The row asked whether `fvm::ddt` under Euler costs anything visible: the closures copy k and epsilon (or
+k and omega) as they enter `correct()`, because OpenFOAM stores the old time at the first non-const
+access of the new one, and the step copies rho the same way.
+
+Measured on gasMixing/injectorPipe at 74,650 cells, from the same profile the gradient rows used: a
+whole-field device-to-device copy there costs 2.6 us, so the three old-time copies are 7.9 us per
+iteration, 0.06% of the iteration's 13.79 GPU ms. They are already one launch per field, which is the
+other half of the row's closing condition.
+
+For context, the whole device-to-device traffic of an iteration is 153 copies and 0.42 ms, 3% of its
+GPU time: 105 whole-field copies at 0.28 ms, 38 boundary-sized at 0.06, and the rest scalars. The
+old-time copies are three of those 105. Folding them into the assembly kernel's read, which the row
+offered as a lever, would save under 8 us and cost the closure's two kernels an extra operand each.
+
+Closed as noise, with the number.

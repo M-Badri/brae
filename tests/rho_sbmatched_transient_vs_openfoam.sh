@@ -112,8 +112,8 @@ grep -q "epsilonWallFunction" "$W/of/0/epsilon" || { echo "FAIL: sbMatched lost 
 # equations, which is how items 26a, 26b and 27 were found and what the tight bounds measure. The third
 # arm is brae's DEFAULT path (the colour Gauss-Seidel momentum solver) at bounds of its own.
 # BRAE_DILU_KE=1 BRAE_DILU_HE=1: since the FP-2 policy (2026-09-12) the device arm answers this case's
-# relaxed `preconditioner DILU` entries on k, epsilon and e with the truncated Neumann series (degree 22
-# and 11 here, from the 0.9 and 0.8 factors), announced. At tolerance 1e-12 relTol 0 the residual pins
+# relaxed `preconditioner DILU` entries on k, epsilon and e with the truncated Neumann series (degree 19
+# and 9 here, from the 0.9 and 0.8 factors), announced. At tolerance 1e-12 relTol 0 the residual pins
 # the iterate only to about 1e-9 -- the series lands k 5.4e-09, epsilon 3.3e-09, U 2.4e-09 from
 # OpenFOAM's, where DILU, being OpenFOAM's own algorithm, lands 8e-12 -- so a gate holding the ASSEMBLY
 # at 1e-10 has to run the same preconditioner as its oracle. The hatches keep DILU; the bounds are

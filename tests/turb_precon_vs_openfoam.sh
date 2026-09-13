@@ -148,10 +148,10 @@ printf '        (nut cells <= 1e-14: series %s, diagonal %s, OpenFOAM %s)\n' "$B
 # The DERIVED degree, not a constant: the fixture relaxes the pair by 0.9, so ceil(ln(0.1)/ln(0.9)) = 22.
 # Pinning the number is the point -- it is what makes this an assertion about the rule rather than about
 # whatever the code happens to do.
-grep -q "solvers/k solver: case asks 'GAMG', brae runs PBiCGStab preconditioned with a degree-22 truncated Neumann series" "$W/dilu/log" \
-    && grep -q "solvers/epsilon solver: case asks 'GAMG', brae runs PBiCGStab preconditioned with a degree-22 truncated Neumann series" "$W/dilu/log" \
-    && say "the notice names the degree-22 series (derived from the fixture's alpha 0.9)" ok \
-    || { grep -m2 "solvers/k solver\|solvers/epsilon solver" "$W/dilu/log"; say "the notice names the degree-22 series (derived from the fixture's alpha 0.9)" FAIL; }
+grep -q "solvers/k solver: case asks 'GAMG', brae runs PBiCGStab preconditioned with a degree-19 truncated Neumann series" "$W/dilu/log" \
+    && grep -q "solvers/epsilon solver: case asks 'GAMG', brae runs PBiCGStab preconditioned with a degree-19 truncated Neumann series" "$W/dilu/log" \
+    && say "the notice names the degree-19 series (derived from the fixture's alpha 0.9)" ok \
+    || { grep -m2 "solvers/k solver\|solvers/epsilon solver" "$W/dilu/log"; say "the notice names the degree-19 series (derived from the fixture's alpha 0.9)" FAIL; }
 
 # ---- arm 5: an UNRELAXED pair falls to DILU, not to the bare diagonal -----------------------------
 # The series' convergence ratio is bounded by the RELAXATION FACTOR, because fvMatrix::relax clamps
@@ -173,7 +173,7 @@ grep -q "solvers/k solver: case asks 'GAMG', brae runs PBiCGStab preconditioned 
     && say "an unrelaxed pair takes DILU, and the notice says why" ok \
     || { grep -m1 "solvers/k solver" "$W/norelax/log"; say "an unrelaxed pair takes DILU, and the notice says why" FAIL; }
 # ...and the RELAXED fixture must not, or the arm above proves nothing about relaxation
-grep -q "preconditioned with a degree-22 truncated Neumann series" "$W/dilu/log" \
+grep -q "preconditioned with a degree-19 truncated Neumann series" "$W/dilu/log" \
     && say "...and the relaxed fixture keeps the series (control)" ok \
     || say "...and the relaxed fixture keeps the series (control)" FAIL
 

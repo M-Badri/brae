@@ -109,9 +109,36 @@ struct SolverRunsAs
 //
 //     d = ceil( ln(POLY_TAU) / ln(alpha) )
 //
-// POLY_TAU is what the preconditioner alone is asked to remove -- 0.1, a tenfold reduction, the same
-// order as the relTol a SIMPLE step asks of the whole solve. At alpha 0.9 that is degree 22; at 0.8, 11;
-// at 0.7, 7; at 0.5, 4.
+// POLY_TAU is what the preconditioner alone is asked to remove. At alpha 0.9 the current 0.15 derives
+// degree 19; at 0.8, 9; at 0.7, 6; at 0.5, 3.
+//
+// IT WAS 0.1 -- a tenfold reduction, the same order as the relTol a SIMPLE step asks of the whole solve
+// -- and 0.25 replaced it on 2026-09-13 (FP-11, bench/results/rhoSimpleFoam_tutorials_gb10.md) because
+// the tenfold target costs and buys nothing measurable. The evidence, all of it against OpenFOAM's own
+// answer rather than against brae's trajectory:
+//
+//   - squareBend at 896,000 cells, 1500 iterations in BOTH codes, residuals at 1e-08 so the comparison
+//     is of ANSWERS: degrees 22, 16, 12 and 8 all land within 7.1e-08 of OpenFOAM's velocity, 3.7e-08
+//     of its pressure and 3.2e-07 to 5.6e-07 of its k, and the spread between degrees is UNORDERED in
+//     the degree (8 is the closest, 16 the furthest), so it is the iterative tolerance, not the
+//     preconditioner. The cost is ordered: the turbulence block 46.6, 40.1, 35.9, 32.4 ms per
+//     iteration, and the whole run 247, 236, 230, 224 s against OpenFOAM-20-core's 638.
+//   - turbulentFlatPlate:kEpsilon at y+ ~ 1 -- the case that DIVERGED until the turbulence solve
+//     stopped being under-preconditioned, and the reason this derivation exists -- passes its gate at
+//     degrees 22, 12 AND 8, with identical numbers (epsilon 1.383e-03, nut 1.884e-04).
+//   - and the failure table below still decides the floor: everything that failed sits above
+//     alpha^d = 0.65 and everything comfortable below 0.35.
+//
+// 0.25 WAS TRIED FIRST AND A GATE SAID NO, which is why the constant is 0.15 and not the 0.25 the
+// converged comparison alone would have allowed. turb_precon_vs_openfoam holds brae's k/epsilon and nut
+// EXTREMES against OpenFOAM's at outer iteration 12 -- a transient health check, not a converged one --
+// and 0.25 (degree 14 at alpha 0.9) puts nut's minimum at 6.54e-05 against its 7.01e-05 bound. Swept on
+// that fixture: degrees 22, 20, 18 and 16 pass (nut min 1.98e-04, 2.04e-04, 2.84e-04, 1.96e-04) and 14
+// fails. So the comfortable threshold is nearer alpha^d = 0.19 than 0.35, and 0.15 sits below it with
+// margin: degree 19 at alpha 0.9, three above the last degree measured good and five above the first
+// measured bad. It still buys back most of the cost -- the turbulence block at 896,000 cells reads 46.6
+// ms/it at degree 22 and 40.1 at 16 -- while the converged answer, which never moved across any of
+// these degrees, stays where it was.
 //
 // THIS IS WHAT THE MEASURED FAILURES SAY, once alpha^d is the variable rather than d. Swept end to end
 // on squareBend, cells at the bound floor at outer iteration 8, all at alpha = 0.9:
@@ -133,10 +160,12 @@ struct SolverRunsAs
 // Cost, turbulence block at 307k, ms per outer iteration: diagonal 12.2 (and broken), degree 10 13.5,
 // degree 22 15.2, degree 45 22.8, DILU 33.6. The derived degree costs 1.7 ms/it more than the magic
 // number and 18.4 less than the factorisation.
-constexpr scalar POLY_TAU = 0.1;
+constexpr scalar POLY_TAU = 0.15;
 // ...and the cap. Above it the series is asked for more terms than have been validated (22 and 24 are
 // the largest measured clean at 112k, 307k and 896k), and the honest answer there is the operator that
-// needs no tuning at all: DILU. alpha 0.91 derives 24; 0.92 derives 27 and falls back.
+// needs no tuning at all: DILU. At TAU 0.25 the cap is reached only above alpha 0.944 (0.945 derives
+// 25 and falls back), where at TAU 0.1 it fell back above 0.92. (0.943 derives 24 and is the last that
+// does not.)
 constexpr int POLY_DEG_KE_MAX = 24;
 
 // THE ONE RULE for what preconditions a substituted PBiCGStab on a transported turbulence scalar, as a

@@ -11,7 +11,7 @@
 # rhoBox arm found the two normFactor paths disagreeing from iteration 2.
 #
 # FIXTURE: validation/rhoBox, whose `"(U|h|e)"` entry names PBiCGStab with DILU and whose h is relaxed
-# at 0.7 -- so on the CUDA mirror the FP-2 policy runs a degree-7 series there, announced.
+# at 0.7 -- so on the CUDA mirror the FP-2 policy runs a degree-6 series there, announced.
 #
 #   ARM 1     the device graph loop against the host loop (BRAE_BICG_HOST_LOOP=1): every residual line
 #             and every written field identical. This is the one the defect broke.
@@ -69,9 +69,9 @@ run "$W/hostnf"    "BRAE_NORMFACTOR_HOST=1"
 run "$W/dilu"      "BRAE_DILU_HE=1"
 
 for a in dev hostloop hostnf; do
-    grep -q "solvers/h preconditioner: case asks 'DILU', brae preconditions with a degree-7 truncated Neumann series" "$W/$a/log" \
-        && say "ARM 3  the $a arm announces the degree-7 series on h" ok \
-        || say "ARM 3  the $a arm announces the degree-7 series on h" FAIL
+    grep -q "solvers/h preconditioner: case asks 'DILU', brae preconditions with a degree-6 truncated Neumann series" "$W/$a/log" \
+        && say "ARM 3  the $a arm announces the degree-6 series on h" ok \
+        || say "ARM 3  the $a arm announces the degree-6 series on h" FAIL
 done
 # ...and the two normFactor paths really are two paths, or ARM 2 compares a run with itself.
 grep -q "normFactor: device-resident" "$W/dev/log" \

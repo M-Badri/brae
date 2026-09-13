@@ -11,7 +11,7 @@
 # iterate at a loose relTol -- the momentum sweep's trade.
 #
 #   FIXTURE     the aerofoilNACA0012 tutorial as it ships (PBiCGStab+DILU on U, k, omega, e; relaxation
-#               0.7 on e, k and omega, so degree 7), functions stripped, residualControl removed, 30
+#               0.7 on e, k and omega, so degree 6), functions stripped, residualControl removed, 30
 #               iterations at the tutorial's OWN tolerances (the loose relTol is the point: at 1e-14 the
 #               preconditioner cannot be seen and rho_tutorials_vs_openfoam already holds that).
 #   ARM SAID    the default run announces the series on k, omega and e; the honoured run
@@ -72,9 +72,9 @@ stage "$W/def"; run "$W/def" X=1                               || { echo "FAIL: 
 stage "$W/hon"; run "$W/hon" BRAE_DILU_KE=1 BRAE_DILU_HE=1     || { echo "FAIL: the honoured run crashed"; tail -8 "$W/hon/log.brae"; exit 1; }
 
 for f in k omega e; do
-    grep -q "solvers/$f preconditioner: case asks 'DILU', brae preconditions with a degree-7 truncated Neumann series" "$W/def/log.brae" \
-        && say "SAID  the default run announces the degree-7 series on $f" ok \
-        || say "SAID  the default run announces the degree-7 series on $f" FAIL
+    grep -q "solvers/$f preconditioner: case asks 'DILU', brae preconditions with a degree-6 truncated Neumann series" "$W/def/log.brae" \
+        && say "SAID  the default run announces the degree-6 series on $f" ok \
+        || say "SAID  the default run announces the degree-6 series on $f" FAIL
     grep -q "solvers/$f preconditioner" "$W/hon/log.brae" \
         && say "SAID  the honoured run announces nothing on $f's preconditioner" FAIL \
         || say "SAID  the honoured run announces nothing on $f's preconditioner" ok
