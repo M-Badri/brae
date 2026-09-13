@@ -1188,4 +1188,26 @@ GPU time: 105 whole-field copies at 0.28 ms, 38 boundary-sized at 0.06, and the 
 old-time copies are three of those 105. Folding them into the assembly kernel's read, which the row
 offered as a lever, would save under 8 us and cost the closure's two kernels an extra operand each.
 
-Closed as noise, with the number.
+Confirmed at scale too: on squareBend at 896,000 cells a whole-field copy costs 46.9 us, so the three
+are 140.7 us per iteration, 0.09% of that iteration's 151 GPU ms. The row closes at both sizes.
+
+BUT THE TRAFFIC AROUND THEM IS NOT NOISE, and the same query found it: at 896,000 cells the iteration
+makes 138 device-to-device copies costing 6.4 ms, 4.2% of its GPU time.
+
+| phase       | bytes      | per iteration | ms/it | us each |
+|-------------|-----------:|--------------:|------:|--------:|
+| turbulence  |  7,168,000 |          33.6 | 1.561 |    46.5 |
+| UEqn        |  7,168,000 |          24.8 | 1.266 |    51.0 |
+| turbulence  | 21,132,800 |           4.8 | 0.865 |   180.1 |
+| pEqn        |  7,168,000 |          16.4 | 0.739 |    45.1 |
+| pEqn        | 21,132,800 |           3.2 | 0.563 |   175.8 |
+| EEqn        | 21,132,800 |           2.0 | 0.363 |   181.4 |
+
+The 21 MB ones are FACE-sized -- the matrix's upper and lower -- and they are the BiCGStab solver
+copying the matrix it was handed into its own stable buffers, once per solve, because the captured
+graph bakes in the addresses its kernels read and the caller's matrix comes from the pool. Six solves
+an iteration, three copies each (diag, upper, lower), about 2.4 ms per iteration at this size.
+
+That is the same problem FP-10's workspaces solve, now with a number worth four times the one that row
+was estimated at: make the turbulence and energy assemblies' matrices persistent, as the momentum one
+now is, and the solver can point its graph at them instead of copying them. Recorded against FP-10.
