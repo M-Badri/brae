@@ -961,3 +961,58 @@ figure at a fixed iteration, not a convergence statement): at 100 iterations U 5
 8.1e-04 / 1.0e-02 / 1.5e-03 / 1.3e-02 and p 3.1e-04 / 7.3e-05 / 5.0e-04 / 6.7e-05 / 2.2e-05 / 1.7e-06
 across the six; at 200 every U figure except the two liquid cases falls below 1e-03 and every p figure
 below 6e-05.
+
+## FP-11: the turbulence block at 896,000 cells (2026-09-13)
+
+The campaign has measured at 112,000 cells and below, where the tutorials live, and the rows that paid
+there were mostly host round trips and launch counts. At 896,000 the balance is different, and this is
+the first look with the current binary. squareBend scaled in all three directions, 100 fixed
+iterations:
+
+| phase       | ms/it | ns/cell |
+|-------------|------:|--------:|
+| UEqn        |  30.1 |      34 |
+| EEqn        |  13.9 |      16 |
+| pEqn        |  78.8 |      88 |
+| turbulence  |  49.0 |      55 |
+| four phases | 171.8 |     192 |
+
+The turbulence block is exactly where the campaign left it -- 49.0 ms/it against the 48.9 recorded on
+2026-09-08 -- so nothing done since has touched it. Its row asks for 46 ns/cell.
+
+WHERE IT GOES, from nsys: the phase is 44.9 GPU ms per iteration and 22.5 of them are the FP64
+matrix-vector product, 50 launches at 450 us each. squareBend relaxes k and epsilon at 0.9, so the
+policy's rule picks a degree-22 Neumann series and each application is 21 of those products.
+
+THE DEGREE, swept at 896k (the same run otherwise, residuals at iteration 100):
+
+| degree | turbulence ms/it | four phases | U at 100 | k at 100 |
+|--------|-----------------:|------------:|---------:|---------:|
+| 22 (the rule's) |       48.9 |       172.0 | 8.92e-03 | 7.11e-03 |
+| 16              |       41.8 |       161.5 | 9.09e-03 | 7.04e-03 |
+| 12              |       39.2 |       160.0 | 9.72e-03 | 7.19e-03 |
+| 8               |       39.1 |       156.6 | 9.59e-03 | 6.93e-03 |
+| 4               |       32.2 |       151.5 | 1.26e-02 | 8.56e-03 |
+| 2               |       28.7 |    diverged | 0.00e+00 |      nan |
+
+Degree 12 meets the row's target -- 39.2 ms/it is 44 ns/cell -- on a trajectory indistinguishable from
+degree 22's at iteration 100. Degree 2 diverges, which is what `turb_precon_vs_openfoam`'s degree-2 arm
+already asserts.
+
+BUT THE DEGREE IS NOT A TUNING KNOB HERE, and that is why this row does not close on this measurement.
+It is derived: fvMatrix::relax bounds the series' ratio by the relaxation factor, so degree
+ceil(ln 0.1 / ln alpha) buys a factor-of-ten residual reduction on ANY case with that factor. Choosing
+12 at alpha = 0.9 means choosing 0.28 instead of 0.1, on one case at one size, at one iteration.
+Changing the constant changes every case's preconditioner, so it needs the health table the row asks
+for -- degrees across cases and sizes, not one trajectory -- and that is a policy change of the same
+kind as the DILU-entry rule, with the same obligation to announce it.
+
+THE SpMV WAS THE OTHER WAY IN, AND IT DOES NOT WORK. FP-12's contiguous-row layout took 37% off the
+FP32 AMG operator, and this product has the same shape: its neighbour loop reads losort[k], then
+lower[f] and psi[owner[f]], three indirections into arrays ordered by face. It was built for the FP64
+product too, bit-identical, wired into the BiCGStab solves and their series, and measured: the products
+it took over went 450 us to 397 (12%, not 37), the turbulence phase 49.0 to 47.4 ms/it, the iteration's
+GPU time 153.0 to 151.0, the wall not at all. Reverted, with the reason in the source: a row layout
+stores each off-diagonal TWICE where the LDU form stores it once, which in FP32 traded 10.5 MB of
+values for 21 and won on coalescing, and in FP64 trades 21 MB for 42 plus a refill pass. The cost here
+is bandwidth, and a layout that doubles the bytes cannot fix bandwidth.

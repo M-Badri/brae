@@ -83,6 +83,23 @@ void amiAmulKernel(
 } // namespace
 
 
+// FP-11 TRIED THE CONTIGUOUS-ROW LAYOUT HERE AND IT DOES NOT TRANSFER. This product is the largest
+// single item at scale -- on squareBend at 896,000 cells it is 22.5 of the turbulence phase's 44.9 GPU
+// ms per iteration and 30.6 of the pressure phase's 69.0, 53 ms of a 172 ms iteration -- and its
+// neighbour loop reads losort[k], then lower[f] and psi[owner[f]], three indirections into arrays
+// ordered by FACE. The same shape in the FP32 AMG operator gave 37% to a row layout (device_amg.cuh).
+//
+// It was built here too, bit-identical (the row is the cell's owner faces in ownerStart order then its
+// neighbour faces in losort order, which is the order below), wired into the BiCGStab solves and their
+// series, and measured on the 896k case: the products it took over went 450 us to 397 (12%, not 37),
+// the turbulence phase 49.0 to 47.4 ms per iteration, the whole iteration's GPU time 153.0 to 151.0,
+// and the wall not at all. Reverted.
+//
+// WHY IT DOES NOT TRANSFER: a row layout stores each off-diagonal TWICE, once for the owner and once
+// for the neighbour, where the LDU form stores it once. In FP32 that traded 10.5 MB of values for 21
+// and the coalescing won; in FP64 it trades 21 MB for 42 on top of a refill pass, and the extra bytes
+// eat the gain. The cost here is bandwidth, and a layout that doubles the bytes cannot fix bandwidth.
+
 void deviceAmul(const DeviceLduView& A, const DeviceBuffer<scalar>& psi, DeviceBuffer<scalar>& Apsi)
 {
     Apsi.resize(A.nCells);
