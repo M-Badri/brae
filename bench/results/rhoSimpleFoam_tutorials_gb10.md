@@ -1211,3 +1211,57 @@ an iteration, three copies each (diag, upper, lower), about 2.4 ms per iteration
 That is the same problem FP-10's workspaces solve, now with a number worth four times the one that row
 was estimated at: make the turbulence and energy assemblies' matrices persistent, as the momentum one
 now is, and the solver can point its graph at them instead of copying them. Recorded against FP-10.
+
+## FP-10 continued: the solved systems made persistent (2026-09-13)
+
+The copy the previous section found is the solver refusing to read a matrix that moves. A captured
+graph bakes in the addresses its kernels read, so `deviceJacobiBiCGStabGraph` copies the caller's
+matrix into its own buffers unless it can prove the caller's matrix has not moved. It now checks the
+four pointers it reads -- `diag`, `upper`, `lower`, `b` -- against what the previous call to the same
+cache entry saw, and takes them directly when they stand still. The cache is keyed on the solution
+field, so "the same cache entry" means "the same field, last step".
+
+Making that check true meant making every solved system persistent:
+
+| system | where it lives now | was |
+|--------|--------------------|-----|
+| momentum matrix   | `rhoSimpleFoam.cu` `ueqnCache`                  | already persistent |
+| turbulence pair   | `kEpsilon.cu` `turbulenceMatrix(dm, slot)`      | rebuilt per correct() |
+| energy matrix     | `rhoSimpleFoam.cu` `eqnCache`                   | rebuilt per step |
+| energy folded     | `rhoSimpleFoam.cu:1245` `foldCache[f.he]`       | fresh pair per step |
+| k, epsilon folded | `turbulence_transport.cu:261` `foldCache[field]`| fresh pair per solve |
+| transport folded  | `device_scalar_transport.cuh:483` `foldCache`   | fresh pair per solve |
+| pressure folded   | `rhoSimpleFoam.cu:1432` `w.diagC` / `w.b`       | already persistent |
+
+The pressure was the one solve already taking the direct path, and it is the reason the matrices alone
+bought almost nothing: with the matrices persistent the trace showed `upper` and `lower` standing still
+for all four solves while `diag` and `b` still moved every step, because the FOLDED diagonal and source
+-- not the assembled matrix -- are what the solver is handed. `foldKernel` writes every cell of both, so
+reusing the buffers changes no arithmetic.
+
+squareBend, 896,000 cells, 100 iterations, nsys with graph-node tracing:
+
+| | face-sized copies | D2D total | GPU busy | four phases | wall |
+|---|---:|---:|---:|---:|---:|
+| before FP-10       | 12.0/it, 2.15 ms | 138/it, 6.37 ms | 151.0 ms/it | 162.6 ms/it | 20.63 s |
+| matrices only      | 10.2/it, 1.84 ms | 134/it, 5.97 ms | 150.1 ms/it | 162.6 ms/it | 20.64 s |
+| + folded systems   |  4.8/it, 0.85 ms | 124/it, 4.60 ms | 148.7 ms/it | 161.5 ms/it | 20.49 s |
+
+Bit-identical, as the fold's full overwrite requires: iteration 100 reads
+`U 9.1792e-03  e 7.0763e-03  p 1.3016e-03  k 7.0959e-03  epsilon 1.5493e-03` in every arm.
+
+The 1.77 ms/it of copy removed shows up as 1.1 ms/it off the four phases and 0.14 s off a 20.6 s run:
+the copies were partly overlapping work that had to happen anyway, which is the same lesson FP-8 and
+FP-9 recorded about blocking reads. The gain is real and it is small.
+
+The 4.8 face-sized copies left are the momentum path's own refresh (`device_pcg.cuh` `diagP`/`upperP`/
+`lowerP`, a different cache with its own per-step copy), 0.85 ms/it. Nothing else in the iteration
+copies a matrix any more.
+
+Gates: `bicg_device_loop_identity`, `bicg_polydeg_host_loop`, `normfactor_device_identity`,
+`dilu_single_block_identity`, `sa_precon_vs_openfoam`, `eeqn_limitedlinear_vs_openfoam`,
+`turb_precon_vs_openfoam`, `determinism_kepsilon`, `determinism_komega`,
+`rho_capture_assembly_identity`, `rho_run_to_run_identity`, `rho_dilu_entry_policy_vs_openfoam`,
+`rho_sbmatched_transient_vs_openfoam`, `rho_gradp_lsq_simplec_vs_openfoam`, `rho_kepsilon_cuda`,
+`rho_eeqn_cuda_{e,e_turbulent,h}`, `kepsilon{,_eqn,_correct}`, `komega_coeffs`, `gpu_komega_sst`
+and `rho_tutorials_vs_openfoam` -- 24 of 24 green.

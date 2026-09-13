@@ -11,6 +11,8 @@
 #include "device_simple.cuh"    // deviceRelaxDiag -- fvMatrix::relax
 #include <cstdio>
 #include <string>
+#include <map>       // FP-10: the folded system kept per field so the solver's graph reads it in place
+#include <utility>
 #include <cmath>
 
 namespace brae {
@@ -258,7 +260,14 @@ void solveScalarEqn(
     // Fold the boundary coefficients in exactly as fvMatrix::solve does, then solve. BiCGStab, not PCG:
     // upwind convection makes upper != lower, so the matrix is asymmetric and a symmetric solver would
     // be solving a different system.
-    DeviceBuffer<scalar> diagC, b, ones;
+    // FP-10: the solver captures its graph against the addresses it was handed, so a folded system that
+    // moves every step is copied into the graph's own buffers instead of read where it lies. The pair is
+    // kept per field -- the same key the solver's graph cache uses -- and foldKernel writes every cell,
+    // so reusing them changes no bits. 12 -> 4 face-sized copies per iteration at 896k.
+    static auto& foldCache = *new std::map<const void*, std::pair<DeviceBuffer<scalar>, DeviceBuffer<scalar>>>();
+    auto& fold = foldCache[field.data()];
+    DeviceBuffer<scalar>& diagC = fold.first;
+    DeviceBuffer<scalar>& b     = fold.second;
     deviceFold(dm, M.diag, M.source, M.iC, M.bC, diagC, b);
 
     DeviceLduView A{};

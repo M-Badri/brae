@@ -10,6 +10,9 @@
 #include "device_pcg.cuh"         // deviceJacobiBiCGStab
 #include "device_simple.cuh"      // deviceFold/deviceRelaxDiag/deviceDiv*Coeffs/deviceLinearUpwindCorr/...
 #include "device_blas.cuh"
+#include <map>
+#include <string>
+#include <utility>
 #include "device_ami.cuh"
 #include "device_cyclic.cuh"
 #include "device_interface.cuh"   // interfaceAssembleMomentum/OffDiagSum/ZeroWallIfCoeff
@@ -468,7 +471,16 @@ void deviceSolveScalarTransport(
         if (cyc && cyc->n) interfaceZeroWallIfCoeff(*cyc, wall->isWallCell);
         cudaCheck(cudaGetLastError(), "setValues");
     }
-    DeviceBuffer<scalar> diagC, B; deviceFold(dm, aRD, src, aIC, aBC, diagC, B);
+    // FP-10: THE FOLDED SYSTEM IS PERSISTENT, per mesh and per field. It was two locals, so the view the
+    // Krylov solve is handed carried a fresh diagonal and right-hand side on every call, and the solve
+    // had to copy the matrix into its own buffers before capturing a graph against them -- at 896,000
+    // cells the largest copy in the iteration. With these stable the solver takes its direct path
+    // (device_pcg.cu) and the copy does not happen. deviceFold resizes and overwrites both.
+    static auto& foldCache = *new std::map<std::pair<const void*, std::string>, std::pair<DeviceBuffer<scalar>, DeviceBuffer<scalar>>>();
+    auto& folded = foldCache[{dm.owner.data(), std::string(fieldName)}];
+    DeviceBuffer<scalar>& diagC = folded.first;
+    DeviceBuffer<scalar>& B = folded.second;
+    deviceFold(dm, aRD, src, aIC, aBC, diagC, B);
     // Stage harness: the assembled system for this transported scalar, at its first assembly only.
     if (stageDumpActive() && stageDumpFirstOnly((std::string("xport-") + fieldName).c_str()))
     {

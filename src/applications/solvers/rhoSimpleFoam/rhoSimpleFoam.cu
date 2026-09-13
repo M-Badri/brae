@@ -1194,7 +1194,11 @@ Residuals rhoSimpleStep(
         ein.hasFvOptions = in.hasFvOptions;
         ein.hasCoupledPatches = in.hasCoupledPatches;
 
-        PressureMatrix E;
+        // FP-10: persistent, for the reason the momentum matrix above is -- the energy solve can then
+        // point its captured graph at this matrix instead of copying it (device_pcg.cu). The assembly
+        // resizes and overwrites every field, as it did when this was a local.
+        static auto& eqnCache = *new std::map<const void*, PressureMatrix>();
+        PressureMatrix& E = eqnCache[dm.owner.data()];
         // Tw.evaluate() -- every energy condition's updateCoeffs evaluates T's patch from the cells as
         // they stand at the energy assembly (fixedEnergy .C:108, gradientEnergy .C:109, mixedEnergy .C:97).
         // The ONLY evaluate T's boundary gets in an iteration: thermo.correct() keeps it on fixesValue
@@ -1237,7 +1241,13 @@ Residuals rhoSimpleStep(
                             E.iC, E.bC, f.he);
         }
 
-        DeviceBuffer<scalar> diagC, b;
+        // FP-10: the energy's folded system kept where the solver's graph captured it, as the pressure's
+        // w.diagC/w.b already are. A fresh pair moved the diagonal and the source under the graph and it
+        // copied the whole matrix back in each step. foldKernel writes every cell, so no bits move.
+        static auto& foldCache = *new std::map<const void*, std::pair<DeviceBuffer<scalar>, DeviceBuffer<scalar>>>();
+        auto& fold = foldCache[f.he.data()];
+        DeviceBuffer<scalar>& diagC = fold.first;
+        DeviceBuffer<scalar>& b     = fold.second;
         deviceFold(dm, E.diag, E.source, E.iC, E.bC, diagC, b);
         const DeviceLduView A = foldedView(dm, E, diagC);
         DeviceBuffer<scalar> dnf;

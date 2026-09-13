@@ -7,6 +7,8 @@
 // substitution this module refuses, a new kernel is written and the reason is recorded above it.
 #include "turbulence_transport.cuh"   // assembleScalarTransport: shared by every transported scalar
 #include "kEpsilon.cuh"
+#include <array>
+#include <map>
 #include <string>
 #include <cstdlib>
 #include <cstdio>
@@ -1005,6 +1007,15 @@ void finishAndSolve(
 } // namespace
 
 
+// FP-10: the turbulence pair's two matrices, kept per mesh. Slot 0 is epsilon's (or omega's), slot 1
+// k's. They were locals, so their diag/upper/lower came from the device pool on every correct() and the
+// Krylov solve had to copy them into its own buffers before capturing a graph against them.
+PressureMatrix& turbulenceMatrix(const DeviceMesh& dm, int slot)
+{
+    static auto& cache = *new std::map<const void*, std::array<PressureMatrix, 2>>();
+    return cache[dm.owner.data()][slot];
+}
+
 void correct(
     DeviceBuffer<scalar>&       k,
     DeviceBuffer<scalar>&       epsilon,
@@ -1083,7 +1094,12 @@ void correct(
     // Solved FIRST, and the k equation below then reads the epsilon this solve produced. That lag is
     // OpenFOAM's and reversing it is a different algorithm that still converges to something plausible.
     {
-        PressureMatrix E;
+        // FP-10: PERSISTENT, so the Krylov solve can point its captured graph at this matrix instead of
+        // copying it. At 896,000 cells that copy is the iteration's largest -- upper and lower are 21 MB
+        // apiece at 180 us, three per solve -- and the solver takes the direct path only while the
+        // addresses it was captured against stay put (device_pcg.cu). Every field here is resized and
+        // overwritten by the assembly, as it was when the object was a local.
+        PressureMatrix& E = turbulenceMatrix(dm, 0);
         assembleEpsEqn(E, st, dm, dbEps, dbK, epsilon, k, nut, in, dbEps.n ? &epsBndLast : nullptr,
                        epsOld.size() ? &epsOld : nullptr);
 
@@ -1110,7 +1126,7 @@ void correct(
 
     // ---- the k equation ----------------------------------------------------------------------
     {
-        PressureMatrix K;
+        PressureMatrix& K = turbulenceMatrix(dm, 1);      // FP-10: persistent, see the epsilon equation
         assembleKEqn(K, st, dm, dbK, dbU, k, epsilon, nut, in, dbK.n ? &kBndLast : nullptr,
                      kOld.size() ? &kOld : nullptr);
 

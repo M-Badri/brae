@@ -211,6 +211,21 @@ struct BiCGGraphCache
     // ...and the Neumann series' degree, because the captured body unrolls it: a replay under a
     // different degree would run the degree it was captured with, silently.
     int polyDeg = -1;
+    // FP-10: WHOSE BUFFERS THE GRAPH READS. The captured body bakes in addresses, so by default the
+    // matrix and the right-hand side are copied into the four below and the graph reads those. At
+    // 896,000 cells that copy is the largest one in the iteration: upper and lower are 21 MB apiece at
+    // 180 us, three copies per solve and six solves, about 2.4 ms per iteration.
+    //
+    // A caller whose matrix lives somewhere persistent does not need it, and the solver can tell: if
+    // this call's A.diag/upper/lower and b are at the SAME addresses as the previous call's, they are
+    // stable, and the graph can be captured against them directly. `lastSrc` is what the previous call
+    // saw, `direct` whether the current graph was captured that way. A pointer that ever moves under a
+    // direct graph forces a recapture, and `directRefused` pins the copy path for a caller whose
+    // buffers keep moving, so the pathological case is one wasted capture and not one per solve.
+    const void* lastSrc[4] = {nullptr, nullptr, nullptr, nullptr};     // diag, upper, lower, b
+    const void* capSrc[4]  = {nullptr, nullptr, nullptr, nullptr};     // ...as they were at capture
+    bool direct = false;
+    bool directRefused = false;
     DeviceBuffer<scalar> gDiag, gUpper, gLower, gB;                    // stable, graph-referenced
     DeviceBuffer<scalar> rA, rA0, pA, yA, AyA, sA, zA, tA, Ax;
     DeviceBuffer<scalar> polyT, polyAt;                                // the Neumann series' work vectors
@@ -267,14 +282,25 @@ bool deviceJacobiBiCGStabGraph(const DeviceLduView& A, const DeviceBuffer<scalar
     c.gUpper.resize(nF); c.gLower.resize(nF);
     for (auto* v : {&c.gNormF, &c.gInit, &c.gSN, &c.gRN, &c.gFinal}) v->resize(1);
     c.gIter.resize(1);
-    // the current matrix and rhs into the stable graph-referenced buffers (async D2D, no host sync)
-    cudaMemcpyAsync(c.gDiag.data(),  A.diag,  nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread);
-    cudaMemcpyAsync(c.gUpper.data(), A.upper, nF*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread);
-    cudaMemcpyAsync(c.gLower.data(), A.lower, nF*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread);
-    cudaMemcpyAsync(c.gB.data(),     b.data(),nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread);
+    // FP-10: is this caller's matrix in the same place it was last time? If so the graph reads it where
+    // it lies and the four copies below do not happen.
+    const void* src[4] = {A.diag, A.upper, A.lower, b.data()};
+    const bool stable = !c.directRefused
+                     && src[0] == c.lastSrc[0] && src[1] == c.lastSrc[1]
+                     && src[2] == c.lastSrc[2] && src[3] == c.lastSrc[3];
+    for (int i = 0; i < 4; ++i) c.lastSrc[i] = src[i];
+    if (!stable)
+    {
+        // the current matrix and rhs into the stable graph-referenced buffers (async D2D, no host sync)
+        cudaMemcpyAsync(c.gDiag.data(),  A.diag,  nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread);
+        cudaMemcpyAsync(c.gUpper.data(), A.upper, nF*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread);
+        cudaMemcpyAsync(c.gLower.data(), A.lower, nF*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread);
+        cudaMemcpyAsync(c.gB.data(),     b.data(),nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread);
+    }
     cudaMemcpyAsync(c.gNormF.data(), dNormFactor, sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread);
     DeviceLduView sA = A;
-    sA.diag = c.gDiag.data(); sA.upper = c.gUpper.data(); sA.lower = c.gLower.data();
+    if (!stable) { sA.diag = c.gDiag.data(); sA.upper = c.gUpper.data(); sA.lower = c.gLower.data(); }
+    const DeviceBuffer<scalar>& rhs = stable ? b : c.gB;
     const bool useDilu = precon && precon->valid;
     if (useDilu) diluUpdate(sA, *const_cast<DeviceDilu*>(precon));
     auto applyPrecon = [&](DeviceBuffer<scalar>& out, const DeviceBuffer<scalar>& in)
@@ -293,7 +319,7 @@ bool deviceJacobiBiCGStabGraph(const DeviceLduView& A, const DeviceBuffer<scalar
 
     // ---- the prologue: rA = b - A psi, the initial residual (sync 1 of 4) -----------------------------
     deviceAmul(sA, psi, c.Ax);
-    deviceCopy(c.rA, c.gB);
+    deviceCopy(c.rA, rhs);
     deviceAxpy(-1.0, c.Ax, c.rA);
     deviceCopy(c.rA0, c.rA);
     deviceSumMagInto(c.rA, s.rNorm.data());
@@ -367,6 +393,11 @@ bool deviceJacobiBiCGStabGraph(const DeviceLduView& A, const DeviceBuffer<scalar
     const bool recapture = !c.exec || c.key != psi.data() || c.tol != tol || c.relTol != relTol
                         || c.maxIter != maxIter || c.minIter != minIter || c.precon != (useDilu ? (const void*)precon : nullptr)
                         || c.polyDeg != polyDeg
+                        // FP-10: the graph reads either the caller's buffers or the copies, and if it
+                        // reads the caller's it is pinned to those addresses.
+                        || c.direct != stable
+                        || (stable && (c.capSrc[0] != src[0] || c.capSrc[1] != src[1]
+                                    || c.capSrc[2] != src[2] || c.capSrc[3] != src[3]))
                         || c.owner != (const void*)A.owner || c.nC != nC || c.diluRD != diluRD || c.diluLevels != diluLv
                         || c.scratchEpoch != epoch || c.amg != (const void*)amg || c.amgCoarseDiag != amgCD;
     if (recapture)
@@ -435,6 +466,8 @@ bool deviceJacobiBiCGStabGraph(const DeviceLduView& A, const DeviceBuffer<scalar
         bicgEndCondK<<<1,1>>>(c.hW, c.gRN.data(), tol, c.gInit.data(), relTol, c.gIter.data(), maxIter, minIter, s.bd.data(), c.gFinal.data());
         cudaCheck(cudaStreamEndCapture(cudaStreamPerThread, &tmp), "bicg capture else end");
         cudaCheck(cudaGraphInstantiate(&c.exec, c.graph, 0), "bicg graph instantiate");
+        c.direct = stable;
+        for (int i = 0; i < 4; ++i) c.capSrc[i] = stable ? src[i] : nullptr;
         c.key = psi.data(); c.tol = tol; c.relTol = relTol; c.maxIter = maxIter; c.minIter = minIter;
         c.precon = useDilu ? (const void*)precon : nullptr;
         c.polyDeg = polyDeg;
