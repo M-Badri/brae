@@ -636,9 +636,76 @@ private:
     // the ROUND TRIP. Each field is fetched at most once per context, and the context lives exactly one
     // evaluation.
     mutable std::map<const void*, std::vector<scalar>> bndCache_, cellCache_;
+    mutable bool prefetched_ = false;
+
+    // ...AND IN ONE ROUND TRIP, NOT ONE PER FIELD. With the per-evaluation cache the patch still made
+    // six blocking copies per iteration on squareBendLiq -- five fetches of 179,200 bytes and the
+    // upload of the result -- at about 500 us each, 3.03 ms of the energy phase. That is not bandwidth
+    // (179 KB in 500 us would be 0.36 GB/s); it is six queue drains. So the first request fills the
+    // WHOLE cache: every registered field is gathered or sliced into one device buffer and that buffer
+    // is copied once. The expression pays for fields it does not name in bytes, which are cheap, rather
+    // than in round trips, which are not.
+    void prefetchAll() const
+    {
+        if (prefetched_) return;
+        prefetched_ = true;
+        const std::size_t n = static_cast<std::size_t>(b_.fvp->size);
+        if (n == 0) return;
+
+        std::vector<const DeviceBuffer<scalar>*> cellSrc, bndSrc;
+        for (const Reg& r : regs_)
+        {
+            if (r.cells && r.cells->size() > 0) cellSrc.push_back(r.cells);
+            if (r.bnd && r.bnd->size() > 0)     bndSrc.push_back(r.bnd);
+        }
+        const DeviceBuffer<scalar>* uc[3] = {&f_.Ux, &f_.Uy, &f_.Uz};
+        const DeviceBuffer<scalar>* ub[3] = {&f_.UxBnd, &f_.UyBnd, &f_.UzBnd};
+        for (int i = 0; i < 3; ++i)
+        {
+            if (uc[i]->size() > 0) cellSrc.push_back(uc[i]);
+            if (ub[i]->size() > 0) bndSrc.push_back(ub[i]);
+        }
+        const std::size_t slots = cellSrc.size() + bndSrc.size();
+        if (slots == 0) return;
+
+        static auto& batchCache = *new std::map<const void*, DeviceBuffer<scalar>>();
+        DeviceBuffer<scalar>& batch = batchCache[static_cast<const void*>(b_.fvp)];
+        batch.resize(slots * n);
+        const DeviceBuffer<label>& fc = faceCellsDev();
+        std::size_t at = 0;
+        for (const DeviceBuffer<scalar>* src : cellSrc)
+        {
+            deviceGatherIndexedInto(*src, fc, batch.data() + at);           // scattered: one gather kernel
+            at += n;
+        }
+        for (const DeviceBuffer<scalar>* src : bndSrc)
+        {
+            cudaCheck(cudaMemcpyAsync(batch.data() + at, src->data() + b_.bndOffset, n * sizeof(scalar),
+                                      cudaMemcpyDeviceToDevice, cudaStreamPerThread),
+                      "patch expression batch slice");                     // contiguous: a device copy
+            at += n;
+        }
+        std::vector<scalar> host(slots * n);
+        cudaCheck(cudaMemcpy(host.data(), batch.data(), slots * n * sizeof(scalar), cudaMemcpyDeviceToHost),
+                  "patch expression batch D2H");                           // the only round trip
+        at = 0;
+        for (const DeviceBuffer<scalar>* src : cellSrc)
+        {
+            cellCache_.emplace(static_cast<const void*>(src),
+                               std::vector<scalar>(host.begin() + at, host.begin() + at + n));
+            at += n;
+        }
+        for (const DeviceBuffer<scalar>* src : bndSrc)
+        {
+            bndCache_.emplace(static_cast<const void*>(src),
+                              std::vector<scalar>(host.begin() + at, host.begin() + at + n));
+            at += n;
+        }
+    }
 
     std::vector<scalar> patchBnd(const DeviceBuffer<scalar>& bnd) const
     {
+        prefetchAll();
         auto it = bndCache_.find(static_cast<const void*>(&bnd));
         if (it != bndCache_.end()) return it->second;
         const std::size_t n = static_cast<std::size_t>(b_.fvp->size);
@@ -667,6 +734,7 @@ private:
     }
     void gather(const DeviceBuffer<scalar>& cells, std::vector<scalar>& out) const
     {
+        prefetchAll();
         auto it = cellCache_.find(static_cast<const void*>(&cells));
         if (it != cellCache_.end()) { out = it->second; return; }
         const std::size_t n = static_cast<std::size_t>(b_.fvp->size);

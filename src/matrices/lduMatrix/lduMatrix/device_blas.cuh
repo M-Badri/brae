@@ -36,6 +36,10 @@ void   deviceDotInto(const DeviceBuffer<scalar>& x, const DeviceBuffer<scalar>& 
 // expression downloads its own faces instead of the whole field they sit in.
 void   deviceGatherIndexed(const DeviceBuffer<scalar>& src, const DeviceBuffer<label>& idx,
                            DeviceBuffer<scalar>& out);
+// ...and the same gather into a slice the caller owns, so several fields can be packed into one buffer
+// and read back with a single copy (FP-7's patch-expression batch).
+void   deviceGatherIndexedInto(const DeviceBuffer<scalar>& src, const DeviceBuffer<label>& idx,
+                               scalar* out);
 void   deviceSumMagInto(const DeviceBuffer<scalar>& x, scalar* dResult);                              // *dResult = sum|x|
 // min, max and arithmetic mean of x into dOut3[0..2], in ONE pass. The three numbers OpenFOAM's bound()
 // needs (bound.C:38-46), and the mean is over the internal field as gAverage there is.

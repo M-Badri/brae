@@ -849,10 +849,27 @@ cost is the round trip, not the payload. Fetching each field at most once per ev
 evaluator walks a tree and asks for a name every time it appears -- is what moved the phase, from 5.8
 to about 4.7 ms per iteration, and the four phases from 21.0 to 19.9.
 
-What remains is one gather per field per PATCH: the case has several expression walls, so about three
-round trips per iteration survive. Collapsing those needs the gathers for every patch and field batched
-into one buffer and one copy before any expression is evaluated, which is a restructuring of
-`evaluatePatchExpressions` rather than of the context.
+THE LAST STEP WAS THE BATCH, and it is the one that shows the rule cleanly. After the cache the patch
+still made SIX blocking copies per iteration -- five fetches of 179,200 bytes and the upload of the
+result -- at about 500 us each. 179 KB in 500 us would be 0.36 GB/s, so that is not bandwidth; it is
+six queue drains. The first request now fills the WHOLE cache: every registered field is gathered (the
+scattered internal values) or sliced (the contiguous boundary values) into ONE device buffer, and that
+buffer comes back in a single copy. The expression pays for fields it does not name in bytes, which
+are cheap, rather than in round trips, which are not.
+
+| squareBendLiq, energy phase | blocking copies/it | their API time | phase wall / busy (nsys) | phase, 3 plain runs |
+|-----------------------------|-------------------:|---------------:|-------------------------:|--------------------:|
+| whole-field downloads       |                8.0 |       2.75 ms  |        4.92 / 1.93 (39%) | 5.7 / 5.9 / 4.7 ms/it |
+| sized by the patch, cached  |                6.0 |       3.03 ms  |        5.17 / 1.98 (38%) | 4.7 / 4.4 / 4.9 |
+| ...and batched into one     |                2.0 |       0.79 ms  |        3.02 / 1.96 (65%) | 4.1 / 3.7 / 3.9 |
+
+The energy phase is 5.8 to 3.9 ms per iteration and the four phases 21.0 to 19.0, which puts
+squareBendLiq at 1.21x of OpenFOAM on 20 cores per iteration where it was 1.08x. The phase is now 65%
+GPU-busy where it was 39%.
+
+Two round trips are left: the batch coming back, and the result going out. The second is a host vector
+pushed into the patch's refValue, so making it async needs a pinned staging buffer that outlives the
+call -- about 0.47 ms per iteration, and the last thing on this row.
 
 Gates: 15 of 16 pass, including `rho_patch_expression_vs_openfoam` at its 1e-12 walls bound,
 `rho_squarebendliq`, `liquid_thermo`, `liquid_inversion`, `energy_bc`, `limit_temperature`,

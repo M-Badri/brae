@@ -1874,10 +1874,15 @@ COMPONENTS = {
                   "DEVICE (deviceGatherIndexed) into a patch-sized buffer, and each field is fetched at most "
                   "ONCE per evaluation. Sizing alone halved the bytes (142.3 -> 70.4 MB per 20 iterations) "
                   "and changed nothing, because it turned five big blocking copies into 74 small ones and "
-                  "the cost is the ROUND TRIP; the cache is what paid, taking the energy phase 5.8 -> 4.7 "
-                  "ms/it and the four phases 21.0 -> 19.9. rho_patch_expression_vs_openfoam holds its 1e-12 "
-                  "walls bound throughout. What is left is one gather per field per PATCH, which needs every "
-                  "patch batched into one copy before any expression is evaluated."),
+                  "the cost is the ROUND TRIP. The cache took the energy phase 5.8 -> 4.7 ms/it, and BATCHING "
+                  "took it to 3.9: the first request fills the whole cache, every registered field gathered "
+                  "(scattered internal values) or sliced (contiguous boundary values) into ONE device buffer "
+                  "read back in a single copy. Blocking copies in that phase went 8.0 -> 6.0 -> 2.0 per "
+                  "iteration and their API time 2.75 -> 3.03 -> 0.79 ms, with the phase 39% -> 65% GPU-busy; "
+                  "the four phases went 21.0 -> 19.0 ms/it, which puts squareBendLiq at 1.21x OpenFOAM on 20 "
+                  "cores per iteration where it was 1.08x. rho_patch_expression_vs_openfoam holds its 1e-12 "
+                  "walls bound throughout. Two round trips remain -- the batch coming back and the result "
+                  "going out -- and the second needs a pinned staging buffer to go async."),
     ],
 }
 

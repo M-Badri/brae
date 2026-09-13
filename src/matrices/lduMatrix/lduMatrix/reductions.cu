@@ -281,11 +281,17 @@ __global__ void gatherIndexedK(int n, const scalar* __restrict__ src, const labe
 void deviceGatherIndexed(const DeviceBuffer<scalar>& src, const DeviceBuffer<label>& idx,
                          DeviceBuffer<scalar>& out)
 {
+    out.resize(idx.size());
+    deviceGatherIndexedInto(src, idx, out.data());
+}
+
+
+void deviceGatherIndexedInto(const DeviceBuffer<scalar>& src, const DeviceBuffer<label>& idx, scalar* out)
+{
     const int n = static_cast<int>(idx.size());
-    out.resize(static_cast<std::size_t>(n));
     if (n == 0) return;
     constexpr int tpb = 256;
-    gatherIndexedK<<<(n + tpb - 1)/tpb, tpb, 0, cudaStreamPerThread>>>(n, src.data(), idx.data(), out.data());
+    gatherIndexedK<<<(n + tpb - 1)/tpb, tpb, 0, cudaStreamPerThread>>>(n, src.data(), idx.data(), out);
     cudaCheck(cudaGetLastError(), "gatherIndexed");
 }
 
