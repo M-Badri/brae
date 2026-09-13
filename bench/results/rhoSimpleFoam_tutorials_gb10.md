@@ -764,3 +764,56 @@ captured graph would replay against whatever the pool later hands to someone els
 hoisted into a per-solver workspace -- 155 buffer declarations across the five assembly files -- before
 any phase can be captured safely. The momentum assembly is the natural first one: it is capture-safe
 as of this change, it has no host reads, and it is 144 launches per iteration.
+
+## FP-10: capturing the momentum assembly, what it took and what it was worth (2026-09-13)
+
+The prerequisite was real, and it took three steps to satisfy, each found by a failure rather than by
+reading:
+
+1. THE ASSEMBLY'S OWN TEMPORARIES. `assembleUEqn`'s 18 declaration sites were stack objects taking
+   blocks from the device pool on every call. They are now named members of a per-mesh workspace, bound
+   at each site by reference (or, for the `[3]` arrays, by pointer) under the same names, so not one
+   line of the arithmetic changed. Bit-identical against a binary built without it on squareBend,
+   injectorPipe and aerofoilNACA0012: every residual line and all nine written fields.
+2. THE HELPER IT CALLS. The stress term allocates sixteen buffers of its own, and it also took
+   ownership of three with `std::move` -- which swaps a buffer's device pointer on every call, the one
+   thing a captured graph cannot survive. It has its own workspace now, and the moved-from buffers are
+   aliased instead of moved.
+3. THE MATRIX IT FILLS. `MomentumMatrix UEqn` was constructed fresh every iteration, so its twelve buffers
+   were pool blocks too -- and EMPTY on entry, which is why the memory checker caught `axpyKernel`
+   reading address 0x100 on the first replay. It is now persistent per mesh.
+
+With all three, the capture works: 200 iterations of squareBend, captured against direct, every
+residual line identical.
+
+WHAT IT WAS WORTH, and the number corrects the estimate that motivated it:
+
+| squareBend, per iteration | direct | captured |
+|---------------------------|-------:|---------:|
+| `cudaLaunchKernel` calls  |  1,003 |      965 |
+| their API time            | 4.08 ms | 3.91 ms |
+| graph launches            |    1.8 |      2.6 |
+| kernels on the GPU        |  1,333 |    1,333 |
+| wall, 200 iterations      | 4.46 / 4.49 s | 4.40 / 4.51 s |
+
+The momentum assembly is 38 launches, not the 144 the phase contains -- the rest of that phase is its
+SOLVE. So capturing it removes 38 launches and 0.17 ms of host API time per iteration, and the wall
+does not move outside noise. The earlier estimate of 3.7 ms per iteration assumed all 1,004 launches
+were capturable; they are not. Most of them are inside solver loops whose trip count depends on a
+residual the host has to read, and a graph cannot hold those.
+
+THE HONEST ARITHMETIC FOR THE REST OF THE ROW: the four assemblies together are of the order of 150 of
+the 1,003 launches, so capturing all of them is worth about 0.7 ms per iteration of host API time on a
+22 ms iteration -- 3%, for the same refactor repeated four more times over about 110 more buffer
+declarations. That is not a good trade at this point in the campaign, and the row should not be
+finished by doing it. What is left in those 1,003 launches is the SOLVERS: the colour Gauss-Seidel
+momentum sweep, the turbulence solves and the DILU walks, which are host-driven loops rather than fixed
+sequences.
+
+WHAT IS KEPT, and why it is not dead code: the three workspaces stay, because they are bit-identical,
+they remove pool churn from the hot path, and they are the prerequisite for any future capture. The
+capture itself stays behind `BRAE_CAPTURE_ASSEMBLY`, and `tests/rho_capture_assembly_identity.sh`
+exercises it on squareBend and the aerofoil -- 30 iterations each, residual lines and written fields
+byte-identical, with the announcement checked in both directions so the arms cannot pass by comparing
+two direct runs. Without that gate the capture path would be untested, and the two failures above are
+exactly what an untested one looks like.

@@ -14,6 +14,7 @@
 #include "device_simple.cuh"
 #include <cmath>
 #include <cstddef>
+#include <map>
 #include <stdexcept>
 
 namespace brae {
@@ -225,6 +226,53 @@ void resolveDynamicViscosity(
 } // namespace
 
 
+namespace {
+// FP-10: THE ASSEMBLY'S TEMPORARIES LIVE ACROSS ITERATIONS, so their device addresses are stable and
+// this phase can be captured into a CUDA graph.
+//
+// WHY. squareBend issues 1,004 kernel launches per iteration at 4.45 ms of host API time, against
+// about 19 ms of wall and 11 of GPU-busy; a captured graph node replays at roughly 0.7 us against 4.4
+// us per launch. Capturing the phase is the only lever that touches that cost -- three blocking-copy
+// removals were measured and moved nothing, because their time was spent waiting for work the GPU had
+// to do anyway. But a graph bakes in the ADDRESSES its kernels use, and these buffers were stack
+// objects taking blocks from the device pool on every call: the pool hands those blocks to somebody
+// else afterwards, so a replay reads and writes memory that no longer belongs to it. That is not a
+// theory -- capturing the assembly with pool temporaries and replaying it dies on the first replay
+// with an illegal memory access.
+//
+// So each temporary becomes a named member here, kept per mesh and resized once. The call sites bind
+// a reference (or, for the [3] arrays, a pointer) with the same name, so the arithmetic below is
+// untouched: nothing changes about what is computed or in what order. Branches that cannot both run --
+// the four div(phi,U) schemes -- share one set of gradient slots; everything else gets its own.
+//
+// The buffers hold the previous iteration's values on entry, exactly as a pool block would have held
+// somebody else's. Every site either resizes-and-overwrites or zeroes explicitly, and end-to-end
+// bit-identity against the pool version is what holds that.
+struct UEqnWorkspace
+{
+    DeviceBuffer<scalar> muCellOwned, muBndOwned, muFace;
+    // the div(phi,U) branch: limitedLinearV, limitedLinear, linearUpwindV and per-component
+    // linearUpwind are mutually exclusive, so one set of slots serves whichever the case names
+    DeviceBuffer<scalar> dUarr[3], dGx[3], dGy[3], dGz[3], dUb[3];
+    DeviceBuffer<scalar> mag2, m2b, magT, magUb, magGx, magGy, magGz;
+    DeviceBuffer<scalar> cx, cy, cz, lu;
+    DeviceBuffer<scalar> cD, cU, cL, uD, uU, uL;          // the scheme's own coefficient scratch
+    DeviceBuffer<scalar> lD, lU, lL, lIC, lBC;            // the laplacian
+    DeviceBuffer<scalar> divPhi, divT;                    // `bounded`
+    DeviceBuffer<scalar> cGx[3], cGy[3], cGz[3], cUb[3];  // corrected snGrad's gradient
+    DeviceBuffer<scalar> ffc[3], lcA, lcB;
+    DeviceBuffer<scalar> acc, accT;                       // MRF / fvOptions accumulation
+    DeviceBuffer<scalar> iCmaxMag, iCmin, relaxT;         // relax()
+};
+UEqnWorkspace& uEqnWorkspace(const DeviceMesh& dm)
+{
+    // Keyed on the mesh's own addressing, which outlives every solve on it; a second mesh gets its own
+    // set and a mesh move keeps the same key (the buffers are resized, not the topology).
+    static auto& cache = *new std::map<const void*, UEqnWorkspace>();
+    return cache[dm.owner.data()];
+}
+}   // namespace
+
 void assembleUEqn(
     MomentumMatrix&             M,
     const DeviceMesh&           dm,
@@ -256,7 +304,9 @@ void assembleUEqn(
     refuseUnsupported(dm, in);
 
     // mu_eff, before anything reads it.
-    DeviceBuffer<scalar> muCellOwned, muBndOwned;
+    UEqnWorkspace& ws = uEqnWorkspace(dm);            // FP-10: persistent temporaries, see above
+    DeviceBuffer<scalar>& muCellOwned = ws.muCellOwned;
+    DeviceBuffer<scalar>& muBndOwned  = ws.muBndOwned;
     const DeviceBuffer<scalar>* muCell = nullptr;
     const DeviceBuffer<scalar>* muBnd = nullptr;
     resolveDynamicViscosity(dm, in, muCellOwned, muBndOwned, muCell, muBnd);
@@ -266,7 +316,7 @@ void assembleUEqn(
     // interpolation error of the product -- and OpenFOAM interpolates the finished volScalarField
     // (laplacianScheme.C:87-94 hands fvm::laplacian the interpolated gamma). The BOUNDARY faces are not
     // interpolated at all: they take muBnd verbatim, which is effectiveFaceViscosity's overwrite.
-    DeviceBuffer<scalar> muFace;
+    DeviceBuffer<scalar>& muFace = ws.muFace;
     deviceInterpolate(dm, *muCell, muFace);
 
     // fvm::div(phi, U), with phi the MASS flux (kg/s). The operator is the incompressible one unchanged:
@@ -321,7 +371,11 @@ void assembleUEqn(
                         "was supplied. Running it off the refreshed one is a different discretisation.");
             }
             const DeviceBuffer<scalar>* Usrc[3] = {&Ux, &Uy, &Uz};
-            DeviceBuffer<scalar> Uarr[3], gx[3], gy[3], gz[3], ub[3];
+            DeviceBuffer<scalar>* Uarr = ws.dUarr;
+            DeviceBuffer<scalar>* gx = ws.dGx;
+            DeviceBuffer<scalar>* gy = ws.dGy;
+            DeviceBuffer<scalar>* gz = ws.dGz;
+            DeviceBuffer<scalar>* ub = ws.dUb;
             for (int k = 0; k < 3; ++k)
             {
                 deviceCopy(Uarr[k], *Usrc[k]);
@@ -357,7 +411,13 @@ void assembleUEqn(
             // limitedLinear on a VECTOR limits on the SCALAR magSqr(U): LimitedScheme.H instantiates it as
             // NVDTVD + limitFuncs::magSqr, so it is neither per-component nor the V form. Reusing the
             // limitedLinearV kernel here would be a different scheme.
-            DeviceBuffer<scalar> mag2, m2b, t, ub, gx, gy, gz;
+            DeviceBuffer<scalar>& mag2 = ws.mag2;
+            DeviceBuffer<scalar>& m2b  = ws.m2b;
+            DeviceBuffer<scalar>& t    = ws.magT;
+            DeviceBuffer<scalar>& ub   = ws.magUb;
+            DeviceBuffer<scalar>& gx   = ws.magGx;
+            DeviceBuffer<scalar>& gy   = ws.magGy;
+            DeviceBuffer<scalar>& gz   = ws.magGz;
             const DeviceBuffer<scalar>* U3[3] = {&Ux, &Uy, &Uz};
             zeroBuffer(mag2, dm.nCells);
             for (int k = 0; k < 3; ++k)
@@ -407,7 +467,8 @@ void assembleUEqn(
             // (lower = -w*phi, upper = lower + phi, then negSumDiag), so blending the two coefficient sets
             // is exact rather than an approximation of a blended-weight kernel. LUST is TWO overrides: this
             // one, and 0.25 of linearUpwind's deferred correction below.
-            DeviceBuffer<scalar> cD, cU, cL, uD, uU, uL;
+            DeviceBuffer<scalar>& cD = ws.cD; DeviceBuffer<scalar>& cU = ws.cU; DeviceBuffer<scalar>& cL = ws.cL;
+            DeviceBuffer<scalar>& uD = ws.uD; DeviceBuffer<scalar>& uU = ws.uU; DeviceBuffer<scalar>& uL = ws.uL;
             deviceDivCentralCoeffs(dm, *in.phiInt, cD, cU, cL);
             deviceDivUpwindCoeffs(dm, *in.phiInt, uD, uU, uL);
             deviceCopy(M.diag, cD);
@@ -439,7 +500,7 @@ void assembleUEqn(
     // deferred source. Doing only one of the two halves is the "Gauss linear orthogonal where the case said
     // corrected" defect this port has already paid for on the energy and pressure equations (PORT.md:394).
     {
-        DeviceBuffer<scalar> lD, lU, lL;
+        DeviceBuffer<scalar>& lD = ws.lD; DeviceBuffer<scalar>& lU = ws.lU; DeviceBuffer<scalar>& lL = ws.lL;
         deviceLaplacianCoeffs(dm, muFace, lD, lU, lL, in.correctedLaplacian);
         deviceAxpy(-1.0, lD, M.diag);
         deviceAxpy(-1.0, lU, M.upper);
@@ -454,7 +515,7 @@ void assembleUEqn(
     for (int k = 0; k < 3; ++k)
     {
         deviceBCDivCoeffs(dbU.comp[k], *in.phiBnd, M.iC[k], M.bC[k]);
-        DeviceBuffer<scalar> lIC, lBC;
+        DeviceBuffer<scalar>& lIC = ws.lIC; DeviceBuffer<scalar>& lBC = ws.lBC;
         deviceBCLaplacianCoeffsFace(dbU.comp[k], *muBnd, lIC, lBC);
         deviceAxpy(-1.0, lIC, M.iC[k]);
         deviceAxpy(-1.0, lBC, M.bC[k]);
@@ -468,7 +529,7 @@ void assembleUEqn(
     // this solver div(phi) is the MASS imbalance, so the term vanishes as the continuity error does.
     if (in.bounded)
     {
-        DeviceBuffer<scalar> divPhi, t;
+        DeviceBuffer<scalar>& divPhi = ws.divPhi; DeviceBuffer<scalar>& t = ws.divT;
         deviceDiv(dm, *in.phiInt, *in.phiBnd, divPhi);
         deviceHadamard(t, divPhi, dm.V);
         deviceAxpy(-1.0, t, M.diag);
@@ -541,7 +602,10 @@ void assembleUEqn(
         // One fused launch for the three components (see the limitedLinearV branch above for why): the
         // boundary values first, then one gradient, then the limiter per component as before.
         const DeviceBuffer<scalar>* U[3] = {&Ux, &Uy, &Uz};
-        DeviceBuffer<scalar> gxc[3], gyc[3], gzc[3], ub[3];
+        DeviceBuffer<scalar>* gxc = ws.cGx;
+        DeviceBuffer<scalar>* gyc = ws.cGy;
+        DeviceBuffer<scalar>* gzc = ws.cGz;
+        DeviceBuffer<scalar>* ub  = ws.cUb;
         for (int k = 0; k < 3; ++k)
         {
             patchU(k, *U[k], ub[k]);
@@ -563,7 +627,7 @@ void assembleUEqn(
             // correction, so all three components share ONE per-face limiter -- which is why this cannot
             // live inside the per-component loop above. Limiting each component on its own is a different
             // scheme, measured at 0.6% on airFoil2D.
-            DeviceBuffer<scalar> ffc[3];
+            DeviceBuffer<scalar>* ffc = ws.ffc;
             deviceLaplacianCorrFluxLimitedVec(
                 dm,
                 muFace,
@@ -577,7 +641,7 @@ void assembleUEqn(
                 ffc);
             for (int k = 0; k < 3; ++k)
             {
-                DeviceBuffer<scalar> lc;
+                DeviceBuffer<scalar>& lc = ws.lcA;
                 deviceFaceDivSource(dm, ffc[k], lc);
                 deviceAxpy(-1.0, lc, M.source[k]);
             }
@@ -588,7 +652,7 @@ void assembleUEqn(
             // `uncorrected`, and that is expressed by correctedLaplacian == false instead.
             for (int k = 0; k < 3; ++k)
             {
-                DeviceBuffer<scalar> lc;
+                DeviceBuffer<scalar>& lc = ws.lcB;
                 deviceLaplacianCorr(dm, muFace, gxc[k], gyc[k], gzc[k], lc);
                 deviceAxpy(-1.0, lc, M.source[k]);
             }
@@ -603,7 +667,11 @@ void assembleUEqn(
     if (in.scheme == cpu::rhoSimple::DivScheme::linearUpwindV)
     {
         const DeviceBuffer<scalar>* Usrc[3] = {&Ux, &Uy, &Uz};
-        DeviceBuffer<scalar> gx[3], gy[3], gz[3], ub[3], cx, cy, cz;
+        DeviceBuffer<scalar>* gx = ws.dGx;
+        DeviceBuffer<scalar>* gy = ws.dGy;
+        DeviceBuffer<scalar>* gz = ws.dGz;
+        DeviceBuffer<scalar>* ub = ws.dUb;
+        DeviceBuffer<scalar>& cx = ws.cx; DeviceBuffer<scalar>& cy = ws.cy; DeviceBuffer<scalar>& cz = ws.cz;
         for (int k = 0; k < 3; ++k)
         {
             patchU(k, *Usrc[k], ub[k]);
@@ -639,7 +707,10 @@ void assembleUEqn(
     if (corrFac != 0.0)
     {
         const DeviceBuffer<scalar>* U[3] = {&Ux, &Uy, &Uz};
-        DeviceBuffer<scalar> ub[3], gx[3], gy[3], gz[3];
+        DeviceBuffer<scalar>* ub = ws.dUb;
+        DeviceBuffer<scalar>* gx = ws.dGx;
+        DeviceBuffer<scalar>* gy = ws.dGy;
+        DeviceBuffer<scalar>* gz = ws.dGz;
         for (int k = 0; k < 3; ++k)
         {
             patchU(k, *U[k], ub[k]);
@@ -655,7 +726,7 @@ void assembleUEqn(
         }
         for (int k = 0; k < 3; ++k)
         {
-            DeviceBuffer<scalar> lu;
+            DeviceBuffer<scalar>& lu = ws.lu;
             // `linearUpwind <name>`, where <name> resolves to `cellLimited Gauss linear <k>`. This
             // correction does NOT vanish at convergence, so an unlimited gradient under a limited name is a
             // different equation, not a transient difference. The gradient is the one the scheme NAMES,
@@ -697,7 +768,7 @@ void assembleUEqn(
         }
         for (int k = 0; k < 3; ++k)
         {
-            DeviceBuffer<scalar> acc, t;
+            DeviceBuffer<scalar>& acc = ws.acc; DeviceBuffer<scalar>& t = ws.accT;
             zeroBuffer(acc, dm.nCells);
             deviceMrfCoriolisZone(*in.mrf, dm.V, Ux, Uy, Uz, k, acc);
             deviceHadamard(t, acc, *in.rhoCell);
@@ -763,7 +834,7 @@ void assembleUEqn(
     M.relaxed = false;
     if (in.relaxEquationU && in.relaxU > 0.0)
     {
-        DeviceBuffer<scalar> iCmaxMag, iCmin;
+        DeviceBuffer<scalar>& iCmaxMag = ws.iCmaxMag; DeviceBuffer<scalar>& iCmin = ws.iCmin;
         deviceCmptMaxMag3(M.iC[0], M.iC[1], M.iC[2], iCmaxMag);
         deviceCmptMin3(M.iC[0], M.iC[1], M.iC[2], iCmin);
 
@@ -787,7 +858,7 @@ void assembleUEqn(
         const DeviceBuffer<scalar>* U[3] = {&Ux, &Uy, &Uz};
         for (int k = 0; k < 3; ++k)
         {
-            DeviceBuffer<scalar> t;
+            DeviceBuffer<scalar>& t = ws.relaxT;
             deviceHadamard(t, M.delta, *U[k]);
             deviceAxpy(1.0, t, M.source[k]);
         }

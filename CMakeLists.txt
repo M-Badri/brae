@@ -2551,6 +2551,12 @@ set_tests_properties(scalar_colour_gs_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77
 
 # D-1: the CUDA arm is bit-reproducible run to run on squareBendLiq, injectorPipe and squareBend, and the
 # atomic bound() scatter it replaced (BRAE_BOUND_SCATTER=1) is seen to drift. Slow: it meshes injectorPipe.
+# FP-10: the captured momentum assembly must compute what the direct one computes. It holds the
+# workspaces and the persistent matrix that make the capture's baked-in addresses valid.
+add_test(NAME rho_capture_assembly_identity
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_capture_assembly_identity.sh)
+set_tests_properties(rho_capture_assembly_identity PROPERTIES SKIP_RETURN_CODE 77 LABELS slow TIMEOUT 1800)
+
 add_test(NAME rho_run_to_run_identity
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_run_to_run_identity.sh)
 set_tests_properties(rho_run_to_run_identity PROPERTIES SKIP_RETURN_CODE 77 LABELS slow TIMEOUT 2400)

@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <map>
 #include <stdexcept>
 #include <vector>
 
@@ -777,8 +778,96 @@ Residuals rhoSimpleStep(
     sd.scalars("rhoU", f.rho);
     sd.surface("phiU", f.phiInt, f.phiBnd);
     sd.scalars("nutU", f.nut);
-    MomentumMatrix UEqn;
-    assembleUEqn(UEqn, dm, dbU, f.Ux, f.Uy, f.Uz, uin);
+    // FP-10: the matrix the assembly fills is persistent too. It was constructed fresh every iteration,
+    // so its diag/upper/lower/source/iC/bC took pool blocks on every call and a captured graph wrote
+    // into addresses the pool had since handed to somebody else -- the memcheck says `axpyKernel` reads
+    // 0x100, a null buffer plus an offset, because the matrix's buffers are EMPTY until the assembly
+    // resizes them. Every site in the assembly resizes-and-zeroes what it writes, so reusing the object
+    // changes nothing about what is computed.
+    static auto& ueqnCache = *new std::map<const void*, MomentumMatrix>();
+    MomentumMatrix& UEqn = ueqnCache[dm.owner.data()];
+    // FP-10 EXPERIMENT (BRAE_CAPTURE_ASSEMBLY=1, off by default): capture the momentum assembly once
+    // and replay it as a CUDA graph. The point is to MEASURE what capture is worth before refactoring
+    // the assemblies' temporaries into a workspace -- squareBend issues 1,004 kernel launches per
+    // iteration at 4.45 ms of host API time, and a graph node replays at about 0.7 us against 4.4 us
+    // per launch.
+    //
+    // WHY IT IS AN EXPERIMENT AND NOT THE DEFAULT: the graph bakes in the addresses of the assembly's
+    // temporaries, which come from the device pool per call. Their addresses are stable only while the
+    // pool hands out the same blocks in the same order, which holds when nothing else perturbs it but
+    // is not a property anyone has guaranteed. The key below covers every pointer this file can SEE;
+    // it cannot cover the ones inside assembleUEqn. So the correctness evidence is end-to-end
+    // bit-identity, and the production version needs the workspace.
+    static const bool captureAsm = std::getenv("BRAE_CAPTURE_ASSEMBLY") != nullptr;
+    if (captureAsm)
+    {
+        struct AsmGraph
+        {
+            cudaGraph_t g = nullptr;
+            cudaGraphExec_t e = nullptr;
+            std::vector<const void*> key;
+            int warm = 0;
+            bool refused = false;
+        };
+        static AsmGraph ag;
+        const std::vector<const void*> key = {
+            UEqn.diag.data(), UEqn.upper.data(), UEqn.lower.data(),
+            UEqn.source[0].data(), UEqn.source[1].data(), UEqn.source[2].data(),
+            UEqn.iC[0].data(), UEqn.iC[1].data(), UEqn.iC[2].data(),
+            UEqn.bC[0].data(), UEqn.bC[1].data(), UEqn.bC[2].data(),
+            f.Ux.data(), f.Uy.data(), f.Uz.data(), f.phiInt.data(), f.rho.data(),
+            in.muEffCell ? in.muEffCell->data() : nullptr,
+        };
+        if (ag.refused || ag.warm < 3)
+        {
+            ++ag.warm;                       // let the pool and the buffers settle before capturing
+            assembleUEqn(UEqn, dm, dbU, f.Ux, f.Uy, f.Uz, uin);
+        }
+        else if (ag.e && key == ag.key)
+        {
+            cudaCheck(cudaGraphLaunch(ag.e, cudaStreamPerThread), "UEqn graph launch");
+        }
+        else
+        {
+            if (ag.e) { cudaGraphExecDestroy(ag.e); ag.e = nullptr; }
+            if (ag.g) { cudaGraphDestroy(ag.g);     ag.g = nullptr; }
+            cudaError_t st = cudaStreamBeginCapture(cudaStreamPerThread, cudaStreamCaptureModeThreadLocal);
+            if (st != cudaSuccess)
+            {
+                ag.refused = true;
+                assembleUEqn(UEqn, dm, dbU, f.Ux, f.Uy, f.Uz, uin);
+            }
+            else
+            {
+                assembleUEqn(UEqn, dm, dbU, f.Ux, f.Uy, f.Uz, uin);
+                st = cudaStreamEndCapture(cudaStreamPerThread, &ag.g);
+                if (st != cudaSuccess || !ag.g)
+                {
+                    // capture declined (a blocking call inside): say so once and stay on the direct path
+                    ag.refused = true;
+                    std::printf("  UEqn assembly: capture declined (%s); running the direct path\n",
+                                cudaGetErrorString(st));
+                }
+                else
+                {
+                    cudaCheck(cudaGraphInstantiate(&ag.e, ag.g, 0), "UEqn graph instantiate");
+                    ag.key = key;
+                    cudaCheck(cudaGraphLaunch(ag.e, cudaStreamPerThread), "UEqn graph launch");
+                    static bool said = false;
+                    if (!said)
+                    {
+                        said = true;
+                        std::printf("  UEqn assembly: captured into a CUDA graph and replayed "
+                                    "(BRAE_CAPTURE_ASSEMBLY; experiment)\n");
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        assembleUEqn(UEqn, dm, dbU, f.Ux, f.Uy, f.Uz, uin);
+    }
     sd.scalars("UDiag", UEqn.diag);
     sd.scalars("UUpper", UEqn.upper);
     sd.scalars("ULower", UEqn.lower);   // the convection makes it differ from upper; the solver experiments need both

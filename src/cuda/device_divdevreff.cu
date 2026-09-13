@@ -276,6 +276,32 @@ void deviceTensorDivSource(const DeviceMesh& dm,
 }
 
 
+namespace {
+// FP-10: the stress term's temporaries persist too, for the reason the momentum assembly's do
+// (rhoUEqn.cu). This function is called from inside that assembly, so its buffers have to be stable
+// before the phase can be captured: capturing with pool temporaries dies on the first replay with an
+// illegal memory access, which is how this was found.
+struct DevReffWorkspace
+{
+    DeviceBuffer<scalar> gradU;
+    DeviceBuffer<scalar> sigmaC;
+    DeviceBuffer<scalar> gradB;
+    DeviceBuffer<scalar> sigmaB;
+    DeviceBuffer<scalar> amiUNx;
+    DeviceBuffer<scalar> amiUNy;
+    DeviceBuffer<scalar> amiUNz;
+    DeviceBuffer<scalar> bvals[3];    // also the boundary values the snGrad half reads
+    DeviceBuffer<scalar> gxs[3];
+    DeviceBuffer<scalar> gys[3];
+    DeviceBuffer<scalar> gzs[3];
+};
+DevReffWorkspace& devReffWorkspace(const DeviceMesh& dm)
+{
+    static auto& cache = *new std::map<const void*, DevReffWorkspace>();
+    return cache[dm.owner.data()];
+}
+}   // namespace
+
 void deviceDivDevReff(
     const DeviceMesh& dm,
     const DeviceVectorBoundary& dbU,
@@ -300,12 +326,20 @@ void deviceDivDevReff(
         throw std::runtime_error("deviceDivDevReff: grad(U) leastSquares is not computed across a coupled interface.");
 
     // gradU (packed 9*nC): row i = gaussGrad(U_i).
-    DeviceBuffer<scalar> gradU(static_cast<std::size_t>(9) * nC);
-    DeviceBuffer<scalar> uxb, uyb, uzb;   // boundary values (reused for snGrad)
-    DeviceBuffer<scalar>* ub[3] = { &uxb, &uyb, &uzb };
+    DevReffWorkspace& ws = devReffWorkspace(dm);       // FP-10: persistent temporaries, see above
+    DeviceBuffer<scalar>& gradU = ws.gradU;
+    gradU.resize(static_cast<std::size_t>(9) * nC);
+    // The boundary values ARE the per-component buffers below: this used to hold three more and take
+    // ownership of them with std::move, which swapped their device pointers every call -- the one
+    // thing a captured graph cannot survive. Aliasing them costs nothing and reads the same values.
+    DeviceBuffer<scalar>& uxb = ws.bvals[0];
+    DeviceBuffer<scalar>& uyb = ws.bvals[1];
+    DeviceBuffer<scalar>& uzb = ws.bvals[2];
 
     // rotational AMI: the gradU neighbour is the ROTATED AMI-interpolated U (forwardT.interp), precompute it.
-    DeviceBuffer<scalar> amiUNx, amiUNy, amiUNz;
+    DeviceBuffer<scalar>& amiUNx = ws.amiUNx;
+    DeviceBuffer<scalar>& amiUNy = ws.amiUNy;
+    DeviceBuffer<scalar>& amiUNz = ws.amiUNz;
     if (ami && ami->rotational)
         deviceAmiInterpolateVec(*ami, Ux, Uy, Uz, amiUNx, amiUNy, amiUNz);
     DeviceBuffer<scalar>* amiUN[3] = { &amiUNx, &amiUNy, &amiUNz };
@@ -321,7 +355,7 @@ void deviceDivDevReff(
     // (tests/test_grad_fused.cu holds the fused kernel to three separate deviceGaussGrad calls by
     // memcmp). The per-component work AFTER the gradient -- the cyclic and AMI contributions, which
     // OpenFOAM adds to the base Gauss gradient before any limiting -- is unchanged and still per i.
-    DeviceBuffer<scalar> bvals[3];
+    DeviceBuffer<scalar>* bvals = ws.bvals;
     for (int i = 0; i < 3; ++i)
     {
         // U's boundary as OF's fvc::grad(U) reads it: the STORED value when the caller keeps one, and a
@@ -338,7 +372,9 @@ void deviceDivDevReff(
             proc->halo->waitExchange();   // recv buffer is reused by the next component -- see device_halo.cuh
         }
     }
-    DeviceBuffer<scalar> gxs[3], gys[3], gzs[3];
+    DeviceBuffer<scalar>* gxs = ws.gxs;
+    DeviceBuffer<scalar>* gys = ws.gys;
+    DeviceBuffer<scalar>* gzs = ws.gzs;
     // fvc::grad(U) through the case's grad(U) entry (linearViscousStress.C's divDevRhoReff takes
     // dev2(T(fvc::grad(U)))): leastSquares where it resolves so, the host's gradULeastSq.
     {
@@ -373,7 +409,6 @@ void deviceDivDevReff(
         cudaCheck(cudaMemcpyAsync(gradU.data() + (0*3+i)*nC, gx.data(), nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread), "ddr g");
         cudaCheck(cudaMemcpyAsync(gradU.data() + (1*3+i)*nC, gy.data(), nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread), "ddr g");
         cudaCheck(cudaMemcpyAsync(gradU.data() + (2*3+i)*nC, gz.data(), nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread), "ddr g");
-        *ub[i] = std::move(bval);
     }
 
     // ...then LIMIT it, if the case named a limited grad(U). OF applies cellLimitedGrad to the base
@@ -381,19 +416,22 @@ void deviceDivDevReff(
     if (gradULimitK > scalar(0)) deviceCellLimitGradU(dm, dbU, Ux, Uy, Uz, gradU, gradULimitK, cyc, ami);
 
     // sigma cell
-    DeviceBuffer<scalar> sigmaC(static_cast<std::size_t>(9) * nC);
+    DeviceBuffer<scalar>& sigmaC = ws.sigmaC;
+    sigmaC.resize(static_cast<std::size_t>(9) * nC);
     sigmaKernel<<<nBlocks(nC), TPB>>>(nC, gradU.data(), nuCell.data(), sigmaC.data());
     cudaCheck(cudaGetLastError(), "ddr sigmaC");
 
     // boundary gradient + sigma boundary
-    DeviceBuffer<scalar> gradB(static_cast<std::size_t>(9) * nB);
+    DeviceBuffer<scalar>& gradB = ws.gradB;
+    gradB.resize(static_cast<std::size_t>(9) * nB);
     gradBKernel<<<nBlocks(nB), TPB>>>(nB, dm.bndCell.data(), dm.bndGFace.data(), dm.Sfx.data(), dm.Sfy.data(), dm.Sfz.data(),
                                       gradU.data(), nC, uxb.data(), uyb.data(), uzb.data(), Ux.data(), Uy.data(), Uz.data(),
                                       /* bnd deltaCoeffs */ dbU.comp[0].deltaCoeffs.data(),
                                       snGradView(dbU.comp[0]), snGradView(dbU.comp[1]), snGradView(dbU.comp[2]),
                                       gradB.data());
     cudaCheck(cudaGetLastError(), "ddr gradB");
-    DeviceBuffer<scalar> sigmaB(static_cast<std::size_t>(9) * nB);
+    DeviceBuffer<scalar>& sigmaB = ws.sigmaB;
+    sigmaB.resize(static_cast<std::size_t>(9) * nB);
     sigmaKernel<<<nBlocks(nB), TPB>>>(nB, gradB.data(), nuBnd.data(), sigmaB.data());
     cudaCheck(cudaGetLastError(), "ddr sigmaB");
 

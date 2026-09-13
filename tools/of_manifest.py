@@ -296,8 +296,20 @@ COMPONENTS = {
                   "iterations: 4.42/4.44/4.52 s against 4.41/4.43), because a blocking copy's cost is "
                   "mostly waiting for work the GPU has to do anyway -- but it was the ONE operation "
                   "that made this assembly impossible to capture into a CUDA graph, since a blocking "
-                  "copy is illegal during stream capture. The momentum assembly is now capture-safe and "
-                  "does no host reads, which is the prerequisite FP-10's row needs."),
+                  "copy is illegal during stream capture. FP-10 THEN CAPTURED THAT ASSEMBLY (2026-09-13) "
+                  "and the capture needed three more things, each found by a failure: this function's "
+                  "sixteen temporaries had to stop coming from the device pool (they are a per-mesh "
+                  "workspace now) and its three std::move handovers had to stop swapping buffer "
+                  "pointers (aliased instead); rhoUEqn.cu's eighteen temporary sites likewise; and the "
+                  "MomentumMatrix, constructed fresh every iteration and EMPTY on entry, had to become "
+                  "persistent -- with a fresh one the memory checker catches axpyKernel reading 0x100 "
+                  "on the first replay. All three are bit-identical (squareBend, injectorPipe, "
+                  "aerofoilNACA0012: every residual line and all nine written fields against a build "
+                  "without them), and tests/rho_capture_assembly_identity.sh holds the captured arm to "
+                  "the direct one. The capture is worth 38 launches and 0.17 ms of host API time per "
+                  "iteration, not the 3.7 ms first estimated: the assembly is 38 launches where the "
+                  "phase is 144, the rest being its solve, and most of an iteration's 1,003 launches "
+                  "are solver loops whose trip count depends on a residual the host reads."),
         dict(name="singlePhaseTransportModel", of_symbol="Foam::singlePhaseTransportModel",
              of_file="src/transportModels/incompressible/singlePhaseTransportModel/"
                      "singlePhaseTransportModel.C",
