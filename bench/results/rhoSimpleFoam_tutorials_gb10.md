@@ -917,3 +917,47 @@ Where the three cases now stand, 200 iterations each, wall including prep:
 | squareBend    | 4.44 s | 4.12 s |
 | squareBendLiq | 4.50 s | 4.25 s |
 | injectorPipe  | 3.75 s | 3.38 s |
+
+## The six tutorials again, after the fast-path campaign (2026-09-13)
+
+Same rules as the table at the top of this file and the same driver: 100 fixed SIMPLE iterations, wall
+time of the solver run only, residualControl removed and `functions` stripped on both sides,
+everything else the tutorial's own. brae is the CUDA mirror arm timed as a whole process; OpenFOAM is
+`mpirun -np 20 rhoSimpleFoam -parallel`, decomposed `hierarchical` with the tutorial's own layout
+scaled to 20 and `scotch` for angledDuct. Every arm completed its iterations. The meshes are the ones
+the September 12 table used.
+
+| tutorial                     |   cells | model                | brae 100 it | OF-20c 100 it | brae is | brae ms/it | OF-20c ms/it | per iteration |
+|------------------------------|--------:|----------------------|------------:|--------------:|--------:|-----------:|-------------:|--------------:|
+| aerofoilNACA0012             |  16,000 | kOmegaSST            |       1.1 s |         1.7 s |   1.55x |          6 |            7 |         1.17x |
+| angledDuctExplicitFixedCoeff |  28,000 | kEpsilon             |       1.1 s |         1.4 s |   1.27x |          6 |            7 |         1.17x |
+| squareBend                   | 112,000 | kEpsilon             |       2.4 s |         3.7 s |   1.54x |         17 |           32 |         1.88x |
+| squareBendLiq                | 112,000 | kEpsilon, liquid     |       2.8 s |         3.7 s |   1.32x |         15 |           25 |         1.67x |
+| squareBendLiqNoNewtonian     | 112,000 | generalizedNewtonian |       2.0 s |         2.8 s |   1.40x |         12 |           21 |         1.75x |
+| injectorPipe                 |  74,650 | kEpsilon             |       2.1 s |         2.8 s |   1.33x |         13 |           20 |         1.54x |
+
+The ms/it columns are iterations 101-200 alone, from a second run at 200 iterations, so start-up is out
+of them (brae: mesh load, device set-up, AMG hierarchy; OpenFOAM: MPI start-up and field reads).
+
+BRAE IS NOW FASTER THAN OPENFOAM ON 20 GRACE CORES ON EVERY ONE OF THE SIX, whole-run and per
+iteration. On 2026-09-12 it was faster on one.
+
+| tutorial                     | whole-run then | now | per iteration then | now |
+|------------------------------|---------------:|----:|-------------------:|----:|
+| aerofoilNACA0012             |          0.89x | 1.55x |             0.62x | 1.17x |
+| angledDuctExplicitFixedCoeff |          0.93x | 1.27x |             0.78x | 1.17x |
+| squareBend                   |          1.33x | 1.54x |             1.52x | 1.88x |
+| squareBendLiq                |          0.87x | 1.32x |             0.70x | 1.67x |
+| injectorPipe                 |          0.94x | 1.33x |             0.95x | 1.54x |
+
+Per iteration, brae's own numbers: the aerofoil 13 -> 6 ms, angledDuct 9 -> 6, squareBend 21 -> 17,
+squareBendLiq 33 -> 15, injectorPipe 21 -> 13. What earned them, in order of what each was worth:
+FP-2's DILU walk rule and the preconditioner policy on the aerofoil; FP-12's contiguous-row AMG
+operator everywhere; FP-6, FP-7 and FP-9's round trips on the liquid cases and every case with a
+flow-rate inlet; FP-1's colour-ordered scalar sweeps and FP-3's cached least-squares tensor.
+
+Trajectory agreement at the last iteration, brae against OpenFOAM, relative L2 (this is an agreement
+figure at a fixed iteration, not a convergence statement): at 100 iterations U 5.9e-04 / 3.3e-04 /
+8.1e-04 / 1.0e-02 / 1.5e-03 / 1.3e-02 and p 3.1e-04 / 7.3e-05 / 5.0e-04 / 6.7e-05 / 2.2e-05 / 1.7e-06
+across the six; at 200 every U figure except the two liquid cases falls below 1e-03 and every p figure
+below 6e-05.
