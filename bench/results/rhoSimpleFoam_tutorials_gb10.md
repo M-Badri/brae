@@ -1016,3 +1016,53 @@ GPU time 153.0 to 151.0, the wall not at all. Reverted, with the reason in the s
 stores each off-diagonal TWICE where the LDU form stores it once, which in FP32 traded 10.5 MB of
 values for 21 and won on coalescing, and in FP64 trades 21 MB for 42 plus a refill pass. The cost here
 is bandwidth, and a layout that doubles the bytes cannot fix bandwidth.
+
+## FP-11: the degree health table, and why the rule stays as it is (2026-09-13)
+
+The degree is the number of terms in the series preconditioner, `M^-1 ~ sum_{j<d} (I - D^-1 A)^j D^-1`;
+each term past the first costs one sparse matrix-vector product. It is derived, not tuned: fvMatrix's
+relaxation bounds the series' ratio by the relaxation factor, so `ceil(ln 0.1 / ln alpha)` buys a
+factor-of-ten residual reduction on any case with that factor. Lowering it is therefore a change to
+every case, and the evidence has to be what the solve LANDS ON. Each arm below ran the same case to the
+same iteration as OpenFOAM on 20 cores, compared field by field.
+
+squareBend, 112,000 cells, 200 iterations -- both codes near converged, so this comparison means
+something (relative L2 against OpenFOAM):
+
+| degree | turbulence ms/it |        U |        p |        k |  epsilon |
+|--------|-----------------:|---------:|---------:|---------:|---------:|
+| 22 (the rule's) |         4.2 | 6.21e-05 | 5.69e-05 | 3.11e-04 | 3.89e-04 |
+| 16              |         3.9 | 9.06e-05 | 9.33e-05 | 4.63e-04 | 5.69e-04 |
+| 12              |         3.8 | 6.64e-05 | 6.06e-05 | 3.15e-04 | 3.97e-04 |
+| 8               |         4.0 | 1.39e-04 | 1.48e-04 | 5.80e-04 | 7.30e-04 |
+| 4               |         3.6 | 1.96e-04 | 2.15e-04 | 9.41e-04 | 1.15e-03 |
+
+squareBend, 896,000 cells, 100 iterations -- and this one CANNOT decide anything, which is the point of
+printing it: at 100 iterations on this mesh neither code is near its answer (U is 1.5e-02 from
+OpenFOAM, k 1.5e-01), so the columns are two transients passing each other, and they move
+non-monotonically with the degree exactly as a transient comparison does.
+
+| degree | turbulence ms/it |        U |        p |        k |  epsilon |
+|--------|-----------------:|---------:|---------:|---------:|---------:|
+| 22 (the rule's) |        49.0 | 1.50e-02 | 1.22e-02 | 1.51e-01 | 1.19e-01 |
+| 16              |        41.8 | 1.42e-02 | 1.26e-02 | 1.32e-01 | 1.06e-01 |
+| 12              |        38.9 | 1.56e-02 | 1.11e-02 | 1.17e-01 | 9.38e-02 |
+| 8               |        39.1 | 1.21e-02 | 9.95e-03 | 7.19e-02 | 6.32e-02 |
+| 4               |        32.2 | 3.33e-02 | 1.50e-02 | 1.69e-01 | 1.33e-01 |
+
+THE OTHER THREE CASES CANNOT DISCRIMINATE IT AT ALL, and knowing why matters more than the numbers:
+squareBendLiq and injectorPipe name `smoothSolver` on k and epsilon, so no series ever runs there, and
+the aerofoil's k and omega solves stop at their relTol of 0.1 within one Krylov iteration whatever
+preconditions them. Every field on all three is identical to three digits across degrees 22, 16, 12, 8
+and 4.
+
+SO THE RULE STAYS. The whole evidence for lowering it is one case at one size: at 112k degree 12 matches
+degree 22 (k 3.15e-04 against 3.11e-04) while 8 and 4 are two to three times worse, and at 112k the
+turbulence block is 4 ms/it, where the saving is worth nothing. Where the saving IS worth something --
+49 to 39 ms/it at 896k -- the comparison that would justify it does not exist yet, because 100
+iterations there is a transient. Changing a derivation that applies to every case on that basis would
+be the substitution this project keeps finding, in the other direction.
+
+WHAT WOULD SETTLE IT: squareBend at 896,000 cells run to convergence in both codes, with the same
+sweep. That is a long run on 20 cores and a long run on the GPU, and it is the only measurement that
+can decide a policy about where a solve lands.
