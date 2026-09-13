@@ -552,15 +552,14 @@ public:
             throw std::runtime_error("brae: " + b_.fn->spec().origin + ": the expression reads the patch value of `"
                                      + name + "`, whose patch values the device arm does not keep as a flat "
                                      "array. Refusing rather than substituting the cell values.");
-        const std::vector<scalar> all = r->bnd->host();
-        out.assign(all.begin() + b_.bndOffset, all.begin() + b_.bndOffset + b_.fvp->size);
+        out = patchBnd(*r->bnd);
         return true;
     }
     bool scalarPatchInternal(const std::string& name, std::vector<scalar>& out) const override
     {
         const Reg* r = find(name);
         if (!r) return false;
-        gather(r->cells->host(), out);
+        gather(*r->cells, out);
         return true;
     }
     bool scalarPatchSnGrad(const std::string& name, std::vector<scalar>& out) const override
@@ -582,25 +581,18 @@ public:
     bool vectorPatchValue(const std::string& name, std::vector<vector>& out) const override
     {
         if (name != "U") return false;
-        const std::vector<scalar> x = f_.UxBnd.host(), y = f_.UyBnd.host(), z = f_.UzBnd.host();
+        const std::vector<scalar> x = patchBnd(f_.UxBnd), y = patchBnd(f_.UyBnd), z = patchBnd(f_.UzBnd);
         out.resize(static_cast<std::size_t>(b_.fvp->size));
-        for (std::size_t i = 0; i < out.size(); ++i)
-        {
-            const std::size_t k = static_cast<std::size_t>(b_.bndOffset) + i;
-            out[i] = vector{x[k], y[k], z[k]};
-        }
+        for (std::size_t i = 0; i < out.size(); ++i) out[i] = vector{x[i], y[i], z[i]};
         return true;
     }
     bool vectorPatchInternal(const std::string& name, std::vector<vector>& out) const override
     {
         if (name != "U") return false;
-        const std::vector<scalar> x = f_.Ux.host(), y = f_.Uy.host(), z = f_.Uz.host();
+        std::vector<scalar> x, y, z;
+        gather(f_.Ux, x); gather(f_.Uy, y); gather(f_.Uz, z);
         out.resize(static_cast<std::size_t>(b_.fvp->size));
-        for (std::size_t i = 0; i < out.size(); ++i)
-        {
-            const std::size_t c = static_cast<std::size_t>(b_.fvp->faceCells[i]);
-            out[i] = vector{x[c], y[c], z[c]};
-        }
+        for (std::size_t i = 0; i < out.size(); ++i) out[i] = vector{x[i], y[i], z[i]};
         return true;
     }
     std::string registeredNames() const override
@@ -626,11 +618,69 @@ private:
             if (r.name == name) return &r;
         return nullptr;
     }
-    void gather(const std::vector<scalar>& cells, std::vector<scalar>& out) const
+    // FP-7: DOWNLOADS SIZED BY THE PATCH, NOT BY THE MESH.
+    //
+    // Every accessor here used to call .host() on a WHOLE field and slice the patch out of it: 112,000
+    // cells or 22,400 boundary faces copied to evaluate an expression over one wall, once per field the
+    // expression names, once per iteration. Measured on squareBendLiq, that is ONE gap of 3.15 ms per
+    // iteration inside the energy phase -- between two bcValueKernel launches, with the GPU idle -- out
+    // of a phase whose wall is 4.9 ms and whose GPU work is 1.9.
+    //
+    // The patch's boundary values are CONTIGUOUS (bndOffset .. +size), so that is one copy of the
+    // patch's own bytes. The patch's internal values are the face cells, which are scattered, so they
+    // are gathered on the DEVICE into a patch-sized buffer and that is copied. Same values either way.
+    // ...AND ONCE PER EVALUATION, NOT ONCE PER MENTION. The expression is a tree the evaluator walks,
+    // and it asks for a field every time the name appears: on squareBendLiq that is 74 asks per
+    // iteration, and with a blocking copy behind each one the phase spends 567 us per ask waiting.
+    // Sizing the transfers by the patch cut the bytes in half and changed nothing, because the cost is
+    // the ROUND TRIP. Each field is fetched at most once per context, and the context lives exactly one
+    // evaluation.
+    mutable std::map<const void*, std::vector<scalar>> bndCache_, cellCache_;
+
+    std::vector<scalar> patchBnd(const DeviceBuffer<scalar>& bnd) const
     {
-        out.resize(static_cast<std::size_t>(b_.fvp->size));
-        for (std::size_t i = 0; i < out.size(); ++i)
-            out[i] = cells[static_cast<std::size_t>(b_.fvp->faceCells[i])];
+        auto it = bndCache_.find(static_cast<const void*>(&bnd));
+        if (it != bndCache_.end()) return it->second;
+        const std::size_t n = static_cast<std::size_t>(b_.fvp->size);
+        std::vector<scalar> out(n);
+        if (n > 0)
+        {
+            cudaCheck(cudaMemcpy(out.data(), bnd.data() + b_.bndOffset, n * sizeof(scalar),
+                                 cudaMemcpyDeviceToHost),
+                      "patch expression boundary slice D2H");
+        }
+        bndCache_.emplace(static_cast<const void*>(&bnd), out);
+        return out;
+    }
+    // The patch's face cells, on the device, built once per patch (the addressing is static).
+    const DeviceBuffer<label>& faceCellsDev() const
+    {
+        static auto& cache = *new std::map<const void*, DeviceBuffer<label>>();
+        DeviceBuffer<label>& d = cache[static_cast<const void*>(b_.fvp)];
+        if (d.size() != static_cast<std::size_t>(b_.fvp->size))
+        {
+            std::vector<label> h(static_cast<std::size_t>(b_.fvp->size));
+            for (std::size_t i = 0; i < h.size(); ++i) h[i] = b_.fvp->faceCells[i];
+            d.copyFrom(h);
+        }
+        return d;
+    }
+    void gather(const DeviceBuffer<scalar>& cells, std::vector<scalar>& out) const
+    {
+        auto it = cellCache_.find(static_cast<const void*>(&cells));
+        if (it != cellCache_.end()) { out = it->second; return; }
+        const std::size_t n = static_cast<std::size_t>(b_.fvp->size);
+        out.resize(n);
+        if (n > 0)
+        {
+            static auto& scratchCache = *new std::map<const void*, DeviceBuffer<scalar>>();
+            DeviceBuffer<scalar>& scratch = scratchCache[static_cast<const void*>(b_.fvp)];
+            scratch.resize(n);
+            deviceGatherIndexed(cells, faceCellsDev(), scratch);
+            cudaCheck(cudaMemcpy(out.data(), scratch.data(), n * sizeof(scalar), cudaMemcpyDeviceToHost),
+                      "patch expression internal gather D2H");
+        }
+        cellCache_.emplace(static_cast<const void*>(&cells), out);
     }
     const PatchExprBinding& b_;
     scalar                  time_;

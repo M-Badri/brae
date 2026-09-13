@@ -1213,11 +1213,20 @@ int runMirrorCuda(const std::string& caseDir)
             deviceSumMagInto(R, twoV.data());
             deviceDotInto(R, ones, twoV.data() + 1);
             scalar sumMagR = 0, dotR = 0;
-            const DeviceReadValue rv2[2] = {
+            // FP-6: the he -> T inversion's two failure slots ride along. thermo.correct() used to read
+            // them with a blocking copy apiece, twice per iteration, inside the energy phase -- 0.97 ms
+            // per iteration on squareBend with the upload that reset them. Four more bytes in a read the
+            // report was making anyway cost nothing, and the throw is the same one.
+            int thermoBadCell = 0, thermoBadBnd = 0;
+            const int* tf = thermoFailFlagPtr();
+            const DeviceReadValue rv2[4] = {
                 {twoV.data(),     &sumMagR, false},
                 {twoV.data() + 1, &dotR,    false},
+                {tf,              &thermoBadCell, true},
+                {tf + 1,          &thermoBadBnd,  true},
             };
-            deviceReadValues(rv2, 2);
+            deviceReadValues(rv2, 4);
+            thermoThrowIfFailed(thermoBadCell, thermoBadBnd, dev.f);
             const scalar sumLocal = hf.deltaT * sumMagR / sumV;
             const scalar global   = hf.deltaT * dotR / sumV;
             cumulativeContErr += global;

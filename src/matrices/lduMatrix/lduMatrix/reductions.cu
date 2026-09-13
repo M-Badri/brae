@@ -266,6 +266,30 @@ void deviceDotInto(const DeviceBuffer<scalar>& x, const DeviceBuffer<scalar>& y,
 }
 
 
+namespace {
+__global__ void gatherIndexedK(int n, const scalar* __restrict__ src, const label* __restrict__ idx,
+                               scalar* __restrict__ out)
+{
+    const int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i < n) out[i] = src[idx[i]];
+}
+}   // namespace
+
+// out[i] = src[idx[i]]. One launch, and the caller copies `out` -- which is the index list's length,
+// not the source's. FP-7: a patch expression was downloading a 112,000-cell field to read the 22,400
+// faces of one wall, once per field it names, once per iteration.
+void deviceGatherIndexed(const DeviceBuffer<scalar>& src, const DeviceBuffer<label>& idx,
+                         DeviceBuffer<scalar>& out)
+{
+    const int n = static_cast<int>(idx.size());
+    out.resize(static_cast<std::size_t>(n));
+    if (n == 0) return;
+    constexpr int tpb = 256;
+    gatherIndexedK<<<(n + tpb - 1)/tpb, tpb, 0, cudaStreamPerThread>>>(n, src.data(), idx.data(), out.data());
+    cudaCheck(cudaGetLastError(), "gatherIndexed");
+}
+
+
 const DeviceBuffer<scalar>& deviceOnes(int n)
 {
     // Leaked on purpose, like the other device caches: no static destructor may run after the CUDA

@@ -226,12 +226,30 @@ void updateEnergyBoundaryCoeffs(
 // The host half of the failure path: one int on the device, INT_MAX meaning "every entry converged".
 namespace
 {
-struct FailFlag
+// FP-6: THE FAILURE FLAG NEVER CROSSES THE BUS INSIDE thermo.correct().
+//
+// It used to be a fresh DeviceBuffer per call, uploaded with a blocking copy (the constructor) and
+// read back with another (`.host()`), for the cell inversion and again for the boundary one. Measured
+// on squareBend, those four 4-byte copies cost 0.97 ms per iteration -- 0.81 of it the two reads --
+// because a blocking copy in the middle of a phase drains the queue and the host then has to refill
+// it. The flag is now a persistent pair of ints reset by a one-thread kernel, and nothing reads it
+// here: the driver reads BOTH entries once per iteration, in the mailbox read the continuity report
+// already makes, and throws the same message from thermoThrowIfFailed.
+//
+// What that costs when an inversion DOES fail: the rest of the iteration runs on an unconverged
+// temperature before the throw, where it used to stop inside correct(). The message says which entry
+// and prints its he, p and seed T, as before; T at that point is what the failing kernel left. A
+// non-finite field would trip the solver's own divergence check first, which is the only thing that
+// can come of it.
+int* thermoFailSlots()
 {
-    DeviceBuffer<int> idx;
-    FailFlag() { idx.copyFrom(std::vector<int>(1, INT_MAX)); }
-    int read() const { return idx.host()[0]; }
-};
+    static DeviceBuffer<int>& idx = *new DeviceBuffer<int>(2);   // [0] cells, [1] boundary faces
+    return idx.data();
+}
+__global__ void resetFailSlotsK(int* idx)
+{
+    if (threadIdx.x == 0 && blockIdx.x == 0) { idx[0] = INT_MAX; idx[1] = INT_MAX; }
+}
 
 [[noreturn]] void throwHeToTFailure(
     const char*                  where,
@@ -268,14 +286,14 @@ void thermoCorrect(
 
     f.psi.resize(nC);
     f.rhoThermo.resize(nC);
+    int* failSlots = thermoFailSlots();
+    resetFailSlotsK<<<1, 32>>>(failSlots);              // no upload, no drain
+    cudaCheck(cudaGetLastError(), "rhoThermoResetFail");
     {
-        FailFlag fail;
         thermoCorrectCellKernel<<<nBlocks(nC), TPB>>>(
             nC, f.he.data(), f.p.data(), c, f.T.data(), f.psi.data(), f.rhoThermo.data(),
-            fail.idx.data());
+            failSlots);
         cudaCheck(cudaGetLastError(), "rhoThermoCorrectCell");
-        const int bad = fail.read();
-        if (bad != INT_MAX) throwHeToTFailure("cell", bad, f.he, f.p, f.T);
     }
 
     // The boundary half: calculate()'s patch loop, NOT an evaluate of T's own conditions -- see the
@@ -290,17 +308,32 @@ void thermoCorrect(
     }
     f.psiBnd.resize(nB);
     f.rhoThermoBnd.resize(nB);
-    FailFlag fail;
     thermoCorrectBndKernel<<<nBlocks(nB), TPB>>>(
         nB, dbT.bcType.data(),
         dbT.ioMask.size()    ? dbT.ioMask.data()    : nullptr,
         dbT.oioMask.size()   ? dbT.oioMask.data()   : nullptr,
         dbT.mixedMask.size() ? dbT.mixedMask.data() : nullptr,
         f.pBnd.data(), c, f.heBnd.data(), f.TBnd.data(), f.psiBnd.data(), f.rhoThermoBnd.data(),
-        fail.idx.data());
+        failSlots + 1);
     cudaCheck(cudaGetLastError(), "rhoThermoCorrectBnd");
-    const int bad = fail.read();
-    if (bad != INT_MAX) throwHeToTFailure("boundary face", bad, f.heBnd, f.pBnd, f.TBnd);
+}
+
+
+// The two slots the driver reads once per iteration, and the throw they feed. Kept here so the message
+// and the diagnostics stay with the kernels that produce them.
+const int* thermoFailFlagPtr()
+{
+    return thermoFailSlots();
+}
+
+
+void thermoThrowIfFailed(
+    int                   cellIdx,
+    int                   bndIdx,
+    const RhoSolverFields& f)
+{
+    if (cellIdx != INT_MAX) throwHeToTFailure("cell", cellIdx, f.he, f.p, f.T);
+    if (bndIdx  != INT_MAX) throwHeToTFailure("boundary face", bndIdx, f.heBnd, f.pBnd, f.TBnd);
 }
 
 

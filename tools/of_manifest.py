@@ -1864,7 +1864,20 @@ COMPONENTS = {
                   "fixedValueFvPatchField, so he gets fixedEnergy seeded from T's `value`; createFields_cpp "
                   "now maps it so. THE WRITER echoes the dictionary (PatchExprField::writeData echoes dict_): "
                   "the functions<> tokens are re-emitted with the tokenizer's single-character delimiters "
-                  "bare -- quoting them made OpenFOAM's reader fail at the functionObjectTrigger's `{`."),
+                  "bare -- quoting them made OpenFOAM's reader fail at the functionObjectTrigger's `{`. "
+                  "SPEED, FP-7 (2026-09-13): those downloads were WHOLE FIELDS. Every accessor of the "
+                  "expression context called .host() on a 112,000-cell or 22,400-face array and sliced the "
+                  "patch out of it, once per field the expression names, once per patch, once per "
+                  "iteration -- measured on squareBendLiq as ONE gap of 3.15 ms per iteration inside an "
+                  "energy phase whose wall is 4.9 ms and whose GPU work is 1.9. The boundary slice is now a "
+                  "copy of the patch's own bytes (it is contiguous), the internal values are gathered on the "
+                  "DEVICE (deviceGatherIndexed) into a patch-sized buffer, and each field is fetched at most "
+                  "ONCE per evaluation. Sizing alone halved the bytes (142.3 -> 70.4 MB per 20 iterations) "
+                  "and changed nothing, because it turned five big blocking copies into 74 small ones and "
+                  "the cost is the ROUND TRIP; the cache is what paid, taking the energy phase 5.8 -> 4.7 "
+                  "ms/it and the four phases 21.0 -> 19.9. rho_patch_expression_vs_openfoam holds its 1e-12 "
+                  "walls bound throughout. What is left is one gather per field per PATCH, which needs every "
+                  "patch batched into one copy before any expression is evaluated."),
     ],
 }
 

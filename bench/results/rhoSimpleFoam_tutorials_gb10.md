@@ -817,3 +817,44 @@ exercises it on squareBend and the aerofoil -- 30 iterations each, residual line
 byte-identical, with the announcement checked in both directions so the arms cannot pass by comparing
 two direct runs. Without that gate the capture path would be untested, and the two failures above are
 exactly what an untested one looks like.
+
+## FP-6 and FP-7: squareBendLiq's energy phase, and the third confirmation of the same lesson (2026-09-13)
+
+squareBendLiq is the one tutorial still slower than 20 cores, and its energy phase costs 5.8 ms per
+iteration against squareBend's 2.2 on the same mesh. Profiled with NVTX phases, that phase is 4.9 ms of
+wall against 1.9 of GPU work, and the idle is ONE gap of 3.15 ms per iteration, sitting between two
+boundary-value kernels.
+
+THE THERMO FAILURE FLAG (FP-6) was the first suspect and is now fixed, on the evidence rather than on
+the outcome. The he-to-T inversion allocated a fresh one-int buffer per call, uploaded it with a
+blocking copy and read it back with another, for the cell pass and again for the boundary pass: four
+4-byte round trips per iteration, 0.97 ms of API time on squareBend. It is now a persistent pair of
+ints reset by a one-thread kernel, and the driver reads both once per iteration inside the mailbox read
+the continuity report already makes. The wall did not move, which by now is the expected answer for
+removing a drain that was waiting on queued work.
+
+THE EXPRESSION PATCHES (FP-7) were the gap. Every accessor of the expression context called `.host()`
+on a WHOLE field and sliced the patch out of it: 112,000 cells or 22,400 faces copied to evaluate an
+expression over one wall, once per field named, once per patch, once per iteration. Two changes, and
+the order in which they paid is the point:
+
+| squareBendLiq            | D2H over 20 iterations | energy phase, 3 runs |
+|--------------------------|-----------------------:|---------------------:|
+| whole-field downloads    |               142.3 MB | 5.7 / 5.9 / 4.7 ms/it |
+| sized by the patch       |                70.4 MB | 5.2 / 6.1 / 5.7 ms/it |
+| ...and cached per evaluation |             70.4 MB | 4.7 / 4.4 / 4.9 ms/it |
+
+Halving the BYTES changed nothing: it replaced five big blocking copies with 74 small ones, and the
+cost is the round trip, not the payload. Fetching each field at most once per evaluation -- the
+evaluator walks a tree and asks for a name every time it appears -- is what moved the phase, from 5.8
+to about 4.7 ms per iteration, and the four phases from 21.0 to 19.9.
+
+What remains is one gather per field per PATCH: the case has several expression walls, so about three
+round trips per iteration survive. Collapsing those needs the gathers for every patch and field batched
+into one buffer and one copy before any expression is evaluated, which is a restructuring of
+`evaluatePatchExpressions` rather than of the context.
+
+Gates: 15 of 16 pass, including `rho_patch_expression_vs_openfoam` at its 1e-12 walls bound,
+`rho_squarebendliq`, `liquid_thermo`, `liquid_inversion`, `energy_bc`, `limit_temperature`,
+`rho_tutorials`, `rho_simple_end_to_end` and run-to-run identity. The one failure, `liquid_correct`, is
+one of the nine that fail identically at HEAD.

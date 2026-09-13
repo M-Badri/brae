@@ -32,6 +32,10 @@ void   deviceFusedScaleAxpy(DeviceBuffer<scalar>& p, const scalar* b, const Devi
 // caller-owned device scalar; the *Dev axpy/scale read their coefficient from a device scalar; the scalar ops do
 // the recurrence arithmetic on-device. Same kernels/arithmetic as the host-scalar path -> bit-identical results.
 void   deviceDotInto(const DeviceBuffer<scalar>& x, const DeviceBuffer<scalar>& y, scalar* dResult);  // *dResult = x.y
+// out[i] = src[idx[i]] : a gather sized by the INDEX list, not by the source. FP-7 uses it so a patch
+// expression downloads its own faces instead of the whole field they sit in.
+void   deviceGatherIndexed(const DeviceBuffer<scalar>& src, const DeviceBuffer<label>& idx,
+                           DeviceBuffer<scalar>& out);
 void   deviceSumMagInto(const DeviceBuffer<scalar>& x, scalar* dResult);                              // *dResult = sum|x|
 // min, max and arithmetic mean of x into dOut3[0..2], in ONE pass. The three numbers OpenFOAM's bound()
 // needs (bound.C:38-46), and the mean is over the internal field as gAverage there is.

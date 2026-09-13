@@ -54,6 +54,12 @@ void thermoCorrect(
 //   heRhoThermo::rho()  ->  rho_      the STORED field, from before the pressure equation ran
 // Recomputing it live for heRhoThermo is wrong wherever p moves appreciably in one iteration; the
 // reference's own comment carries the angledDuct measurement that established it.
+// FP-6: the he -> T inversion's failure flag, device-resident. thermoCorrect never reads it; the
+// driver reads both entries once per iteration (batched with the continuity report's mailbox read) and
+// calls thermoThrowIfFailed, which raises the same error the inline check used to.
+const int* thermoFailFlagPtr();
+void thermoThrowIfFailed(int cellIdx, int bndIdx, const RhoSolverFields& f);
+
 void updateRho(
     RhoSolverFields&    f,
     const ThermoCoeffs& c);
