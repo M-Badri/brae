@@ -72,10 +72,14 @@ void correctNu(
     DeviceBuffer<scalar> gradU(static_cast<std::size_t>(9) * nC);
     for (int i = 0; i < 3; ++i)
     {
+        // ASYNC on the per-thread stream, ordered before the consumer, as deviceGradU and
+        // deviceLeastSquaresGradU do it -- and as divDevRhoReff was fixed to do (FP-10). These were
+        // BLOCKING copies, nine per correctNu and correctNu runs twice per iteration: each one drains
+        // the queue and leaves the host to refill it. Same bytes, same order, same bits.
         const std::size_t bytes = static_cast<std::size_t>(nC) * sizeof(scalar);
-        cudaCheck(cudaMemcpy(gradU.data() + (0 * 3 + i) * nC, gxs[i].data(), bytes, cudaMemcpyDeviceToDevice), "gn g");
-        cudaCheck(cudaMemcpy(gradU.data() + (1 * 3 + i) * nC, gys[i].data(), bytes, cudaMemcpyDeviceToDevice), "gn g");
-        cudaCheck(cudaMemcpy(gradU.data() + (2 * 3 + i) * nC, gzs[i].data(), bytes, cudaMemcpyDeviceToDevice), "gn g");
+        cudaCheck(cudaMemcpyAsync(gradU.data() + (0 * 3 + i) * nC, gxs[i].data(), bytes, cudaMemcpyDeviceToDevice, cudaStreamPerThread), "gn g");
+        cudaCheck(cudaMemcpyAsync(gradU.data() + (1 * 3 + i) * nC, gys[i].data(), bytes, cudaMemcpyDeviceToDevice, cudaStreamPerThread), "gn g");
+        cudaCheck(cudaMemcpyAsync(gradU.data() + (2 * 3 + i) * nC, gzs[i].data(), bytes, cudaMemcpyDeviceToDevice, cudaStreamPerThread), "gn g");
     }
     if (gradULimitK > scalar(0))
     {

@@ -1066,3 +1066,75 @@ be the substitution this project keeps finding, in the other direction.
 WHAT WOULD SETTLE IT: squareBend at 896,000 cells run to convergence in both codes, with the same
 sweep. That is a long run on 20 cores and a long run on the GPU, and it is the only measurement that
 can decide a policy about where a solve lands.
+
+## FP-13: generalizedNewtonian, measured and closed (2026-09-13)
+
+The row asked for a measurement, not a lever. squareBendLiqNoNewtonian at 112,000 cells, 20 iterations
+under nsys with NVTX phases, whole iteration 2,044 launches and 13.41 GPU ms:
+
+| kernel                              | per iteration | ms/it |
+|-------------------------------------|--------------:|------:|
+| powerLawNuKernel (the closure itself) |           2.0 | 0.083 |
+| gradBKernel (its boundary gradient)   |           2.0 | 0.054 |
+| gradFusedKernel (shared with the assembly) | 4.0      | 0.669 |
+| cellLimitGradKernel (likewise)        |           5.0 | 0.706 |
+
+The power-law viscosity is 0.6% of the iteration's GPU time, and the turbulence phase on this case is
+1.3 ms per iteration, the cheapest of the four. The row's own reading was right: what this case spends
+above squareBend's is the gradient work, and that work belongs to the momentum assembly's schemes
+rather than to the closure.
+
+ONE DEFECT FOUND AND FIXED WHILE MEASURING: `correctNu` packed its velocity gradient into the 9*nC
+tensor with NINE BLOCKING device-to-device copies, and it runs twice per iteration -- the same pattern
+FP-10 fixed in divDevRhoReff, in a function written at the same time. They are async on the per-thread
+stream now: same bytes, same order, same bits. Five gates pass, including
+`rho_generalized_newtonian_vs_openfoam`, the tutorials and run-to-run identity.
+
+WHAT IS LEFT, and it is small: the closure computes its OWN Gauss grad(U) rather than taking the memo
+the closures share (`deviceGradUShared`). Two of the four fused-gradient launches per iteration are
+its, about 0.33 ms. Taking the memo is not mechanical -- the memo evaluates U's boundary values its own
+way and the closure is handed stored ones -- so it is a correctness question about which boundary
+values OpenFOAM's strainRate sees, not a packaging one. Recorded, not done.
+
+The row is closed: the closure is not a cost on this case.
+
+## FP-11: the converged comparison at 896,000 cells, which decides it (2026-09-13)
+
+The measurement the last round said was missing. squareBend scaled to 896,000 cells, 1500 iterations in
+BOTH codes -- far enough that each has stopped moving (OpenFOAM's last residuals are 7e-09 on p and
+1e-08 on k; brae's are 1e-08 to 2e-08 on every field) -- so this compares ANSWERS, not two transients.
+OpenFOAM is `mpirun -np 20`, the same decomposition as the benchmark table.
+
+| arm                    | 1500 iterations | turbulence ms/it |        U |        p |        T |        k |  epsilon |
+|------------------------|----------------:|-----------------:|---------:|---------:|---------:|---------:|---------:|
+| OpenFOAM, 20 cores     |           638 s |                - |        - |        - |        - |        - |        - |
+| brae, the rule's degree 22 |        247 s |             46.6 | 7.08e-08 | 3.62e-08 | 1.85e-08 | 3.24e-07 | 3.10e-07 |
+| brae, degree 16        |           236 s |             40.1 | 6.84e-08 | 3.67e-08 | 1.81e-08 | 5.60e-07 | 5.07e-07 |
+| brae, degree 12        |           230 s |             35.9 | 7.10e-08 | 3.67e-08 | 1.69e-08 | 4.64e-07 | 4.13e-07 |
+| brae, degree 8         |           224 s |             32.4 | 7.22e-08 | 3.72e-08 | 1.89e-08 | 3.19e-07 | 3.08e-07 |
+
+TWO RESULTS, AND THE FIRST IS THE BIGGER ONE.
+
+brae converges this case in 247 seconds against OpenFOAM's 638 on 20 Grace cores -- 2.6x -- and lands
+within 7e-08 of its velocity field, 3.6e-08 of its pressure and 3.2e-07 of its turbulence. That is the
+campaign's first convergence-level number at scale rather than a fixed-iteration one, and the agreement
+is three orders tighter than any fixed-iteration comparison in this file, because at convergence the
+iterate the preconditioner stops on no longer matters.
+
+Second, the degree does not move the answer. All four arms agree with OpenFOAM to the same seven or so
+digits, and the spread BETWEEN degrees (k 3.19e-07 to 5.60e-07) is unordered in the degree -- degree 8
+is the closest and 16 the furthest -- so it is the iterative tolerance talking, not the preconditioner.
+What the degree does change is the cost: the turbulence block 46.6 to 32.4 ms per iteration, 30%, and
+the whole run 247 to 224 seconds.
+
+AND THE CASE THAT ARGUED AGAINST LOWERING IT SURVIVES. turbulentFlatPlate:kEpsilon at y+ ~ 1 is the
+case that diverged until the turbulence solve stopped being under-preconditioned -- the reason the
+derived rule exists at all. Its gate was run at degrees 22, 12 and 8: all three pass, with identical
+numbers (epsilon 1.383e-03, nut 1.884e-04 against OpenFOAM), and the control still fails as it must.
+
+SO THE EVIDENCE NOW SUPPORTS LOWERING THE CONSTANT, and it is a policy change to be made deliberately
+rather than a lever to pull. The rule is degree = ceil(ln(TAU) / ln(alpha)) with TAU = 0.1; the
+measurements say TAU = 0.25 (degree 14 at alpha = 0.9, 4 instead of 7 at 0.7) preserves the converged
+answer on the case where the cost is real, preserves the case the rule was written for, and is worth
+about 10 ms per iteration at 896,000 cells. What it would cost is the factor-of-ten margin on cases
+nobody has run, which is exactly what the current constant buys. Recorded for the decision; not made.
