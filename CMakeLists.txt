@@ -2561,6 +2561,12 @@ add_test(NAME rho_run_to_run_identity
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_run_to_run_identity.sh)
 set_tests_properties(rho_run_to_run_identity PROPERTIES SKIP_RETURN_CODE 77 LABELS slow TIMEOUT 2400)
 
+# T-5: a run whose residuals go non-finite must refuse rather than report a wall time for a run that
+# computed nothing. Oracle: OpenFOAM aborts on the same input. Control: BRAE_ALLOW_NONFINITE=1.
+add_test(NAME rho_nonfinite_refusal
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_nonfinite_refusal.sh)
+set_tests_properties(rho_nonfinite_refusal PROPERTIES SKIP_RETURN_CODE 77 LABELS slow TIMEOUT 1800)
+
 # FP-2 policy: a relaxed `preconditioner DILU` entry on k, omega/epsilon and the energy field takes the
 # Neumann series on the CUDA arm, announced, with BRAE_DILU_KE/HE=1 keeping DILU; held against OpenFOAM
 # on the aerofoil at the tutorial's own relTol, with the health (bounding) and the speed asserted.

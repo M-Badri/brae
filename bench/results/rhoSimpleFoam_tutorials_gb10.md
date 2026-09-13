@@ -1383,3 +1383,152 @@ GB10-specific -- `bench/rhoSimpleFoam/run_benchmark.sh` takes `SIZES`, `ITERS` a
 only OpenFOAM and a built brae -- so the same table can be produced on an H100 host as-is. The one
 thing that would want checking there is the AMGX CLASSICAL path, which fails on sm_121 and may well
 work on sm_90.
+
+## T-5 closed: a diverged run refuses (2026-09-13)
+
+The benchmark above found it. squareBend run subsonic diverges; OpenFOAM aborts on it at iteration 19,
+and brae completed all 100 iterations printing `e nan   p nan   k nan`, exited 0 and reported a wall
+time. A solver that hands back a number for a run that computed nothing is the silent substitution this
+project refuses everywhere else.
+
+`rhoSimpleFoamDriver.cu` now checks the residuals it has ALREADY brought to the host for its summary
+line -- so the check costs nothing -- and throws on the first one that is not finite, naming the field
+and the iteration. **It stops at iteration 19, the same iteration OpenFOAM stops at.**
+`BRAE_ALLOW_NONFINITE=1` restores the old behaviour.
+
+`tests/rho_nonfinite_refusal.sh`, registered as `rho_nonfinite_refusal`, 84 s:
+
+| | |
+|---|---|
+| ORACLE | OpenFOAM aborts on the same input (exit 134 after 19 iterations). If it ever completes this case, the reproducer has stopped reproducing and the gate fails rather than testing nothing. |
+| ARM | brae exits non-zero, names the field, and says the run diverged -- after 19 iterations |
+| ARM | it stops when the divergence appears, not at the last iteration |
+| CONTROL | `BRAE_ALLOW_NONFINITE=1` runs all 100 iterations, so the refusal is this check and not some other failure |
+| FAIL-PROOF | the tutorial as shipped still reaches iteration 100 with the check armed |
+
+Regression: `rho_simple_step_cuda{,_boundary,_device_thermo,_device_thermo_rho}`,
+`simple_residualcontrol_regex`, `rho_smoothsolver_vs_openfoam`, `rho_reproducible`,
+`mirror_continuity`, `rho_run_to_run_identity`, `rho_tutorials_vs_openfoam` -- all green.
+
+## The benchmark matrix: bench/rhoSimpleFoam/run_matrix.sh (2026-09-13)
+
+`run_benchmark.sh` does squareBend only. `run_matrix.sh` runs EVERY tutorial at SEVERAL mesh sizes
+across SEVERAL arms on whatever machine it is given, and writes the host's own description into every
+row of `results.csv`, so a GB10 run and an H100 run concatenate into one table without editing:
+
+    TARGETS="native 1000000 10000000" ARMS="brae of" CORES=20 ./run_matrix.sh
+
+Arms are `brae`, `of` (mpirun on CORES), `amgx` and `petsc`. Each tutorial is scaled through the knobs
+its own blockMeshDict exposes, because the six do not share a dict style: squareBend and injectorPipe
+write literal `(nx ny nz)` triples; squareBendLiq and the NoNewtonian variant use named counts
+(`nxin`, `nxout`, `nxbend`, `ny`, `nz`) that later `#eval` entries derive from; angledDuct is driven by
+a target cell SIZE (`cellWidth`), which scales inversely; the aerofoil scales in plane only
+(`zCells`, `xUCells`, `xMCells`, `xDCells`) because it is extruded. A row is only reported as a time if
+the run reached the last iteration, so a diverged arm can never be read as a fast one.
+
+Two things it got wrong first, both now fixed and commented with the evidence:
+
+- **Counts were written back as floats.** `41.0` where blockMesh reads an int32: squareBendLiq, the
+  NoNewtonian variant and the aerofoil all failed to mesh when scaled.
+- **Non-integer scale factors give OpenFOAM a mesh it cannot solve.** On squareBend's transonic bend,
+  every non-integer factor tried diverged for OpenFOAM (504k at x1.65, 975k at x2.07, 9.9M at x4.42)
+  while both integer ones solved (896k at x2, 3.02M at x3) -- INCLUDING THE FINER OF THE TWO, so it is
+  the block proportions and not the resolution. Rounding each block's counts independently changes
+  their relative resolution at the bend. `SNAP=1` (default) now rounds the factor to a whole number so
+  the scaled mesh is geometrically similar to the tutorial's; the realised cell count is always what the
+  row reports. This is a defect in the mesh generator, not a property of OpenFOAM, and is not reported
+  as one.
+
+### The matrix, one GB10 against 20 Grace cores, 100 fixed iterations
+
+| case | cells | brae | OpenFOAM-20c | brae is | brae ns/cell | OF ns/cell |
+|---|---:|---:|---:|---:|---:|---:|
+| aerofoilNACA0012 | 16,000 | 1.1 s | 1.7 s | **1.64x** | 667 | 1092 |
+| aerofoilNACA0012 | 1,024,000 | 38.0 s | 156.4 s | **4.12x** | 371 | 1527 |
+| aerofoilNACA0012 | 10,000,000 | 610.7 s | 2448.9 s | **4.01x** | 611 | 2449 |
+| angledDuctExplicitFixedCoeff | 28,000 | 1.1 s | 1.3 s | **1.23x** | 385 | 475 |
+| angledDuctExplicitFixedCoeff | 1,006,236 | 18.8 s | 24.5 s | **1.31x** | 187 | 244 |
+| angledDuctExplicitFixedCoeff | 10,021,508 | 233.1 s | 286.3 s | **1.23x** | 233 | 286 |
+| injectorPipe | 74,650 | 2.1 s | 3.0 s | **1.41x** | 288 | 405 |
+| injectorPipe | 905,598 | 24.7 s | 29.4 s | **1.19x** | 273 | 324 |
+| injectorPipe | 2,596,996 | 81.0 s | 98.2 s | **1.21x** | 312 | 378 |
+| squareBend | 112,000 | 2.5 s | 3.9 s | **1.60x** | 220 | 352 |
+| squareBend | 9,909,171 | 301.1 s | (mesh, see above) | - | 304 | - |
+| squareBendLiq | 112,000 | 2.7 s | 3.6 s | **1.32x** | 245 | 322 |
+| squareBendLiq | 896,000 | 18.9 s | 26.6 s | **1.41x** | 211 | 296 |
+| squareBendLiqNoNewtonian | 112,000 | 2.0 s | 2.7 s | **1.34x** | 181 | 243 |
+| squareBendLiqNoNewtonian | 896,000 | 16.0 s | 19.2 s | **1.20x** | 179 | 214 |
+
+injectorPipe's 10M target realised 2.6M: it is a snappyHexMesh case and the background refinement does
+not carry that far. The row reports what it actually meshed.
+
+**THE AEROFOIL AT 10 MILLION CELLS IS THE OUTLIER AND THE INTERESTING ONE**: 4.01x, where it is 1.64x on
+its own 16,000-cell mesh. It is the only 2D-extruded case here, it carries kOmegaSST, and at 16k it was
+the case most damaged by the launch floor (667 ns/cell, the worst in the table). Given a mesh big enough
+to fill the GPU, that same case is the one brae wins by most -- its per-cell cost barely moves,
+667 -> 611 ns, while OpenFOAM's more than doubles, 1092 -> 2449. The launch floor and this are the two
+ends of one curve.
+
+## T-6 answered: the aerofoil's 4x is OpenFOAM's GAMG degrading, not brae speeding up (2026-09-13)
+
+The matrix left one question: why does aerofoilNACA0012 go 1.64x -> 4.12x -> 4.01x as its mesh grows
+while five other cases sit in a 1.2-1.6x band that never widens? The answer is in the pressure solve,
+and it is on OpenFOAM's side.
+
+GAMG's iteration count, the tutorial's own solver settings, `relTol 0.01`, averaged over the run:
+
+| case | native | ~1M | 10M |
+|---|---:|---:|---:|
+| **aerofoilNACA0012** | 23.1 | **185.4** | **311.9** (range 232-528) |
+| angledDuctExplicitFixedCoeff | 4.3 | 10.5 | - |
+
+A multigrid method that needs 312 cycles to drop a residual by a factor of 100 has stopped being a
+multigrid method. On the aerofoil it degrades EIGHT-FOLD between 16k and 1M; on angledDuct it barely
+moves and stays cheap. brae's AMG-preconditioned Krylov on the same 10M mesh takes 135-185 iterations
+and does not degrade the same way.
+
+WHY THAT CASE. The aerofoil is the only mesh here with strong grading -- `zGrading 40` from the
+aerofoil surface to the far field, on top of `xUGrading 5` and `xDGrading 10` -- and scaling it 25x in
+plane multiplies the anisotropy rather than relieving it. Pairwise agglomeration is exactly what
+anisotropy defeats: the agglomerated coarse operator stops representing the fine one along the
+stretched direction. It is not the turbulence model and not the 2D extrusion, both of which were the
+other candidates.
+
+The comparison is sound on the mechanical points, which were checked before drawing this conclusion:
+
+- **The decomposition is balanced.** 20 ranks x exactly 500,000 cells at 10M, about 3,400 processor
+  faces per rank against a million boundary faces. OpenFOAM is not being starved by the partition.
+- **Both codes are at the same place after 100 iterations.** brae's initial p residual at iteration 100
+  is 8.27e-02, OpenFOAM's 9.79e-02. Neither is stopping short of the other.
+- **Same tolerance, same relTol.** brae announces the substitution (`case asks 'GAMG', brae runs PCG
+  preconditioned with GAMG`) at start-up.
+
+WHAT THIS MEANS FOR THE OTHER ROWS: brae's margin on a case is set by how badly OpenFOAM's GAMG copes
+with that case's mesh, not by brae getting faster with size. On meshes where GAMG is healthy the margin
+is the 1.2-1.6x that the hardware and the port earn. That reframes the remaining fast-path work: T-1's
+launch floor and T-2's assembly capture both buy their share of a 1.2-1.6x, and neither is what produced
+the 4x.
+
+THE HONEST CAVEAT: this is OpenFOAM running the tutorial's own solver settings, which is the rule this
+whole benchmark follows. A tuned GAMG on the aerofoil -- a different agglomerator, more sweeps, a
+different coarsest solve -- might close much of the gap, and nobody here has tried. The 4x is a
+statement about the case as the tutorial ships it, not about what OpenFOAM can be made to do.
+
+## brae did not build on CUDA 12 at all (2026-09-13)
+
+Found by taking brae to a second machine. `device_pcg.cu` defined `neumannPrecon` -- the truncated
+Neumann series preconditioner -- inside the `#ifdef BRAE_HAS_GS_DEVICE` block, which
+`device_amg_detail.cuh` gates on `CUDART_VERSION >= 13000`, and then CALLED IT FROM THE HOST LOOP
+BELOW, which is outside that block and is exactly the path a CUDA 12 toolkit takes:
+
+    error: identifier "neumannPrecon" is undefined
+
+Nothing in the series needs CUDA 13's conditional graphs -- it is host code launching per-cell kernels,
+deliberately so, because the whole argument for it over DILU is that it has no ordering. The guard
+belongs on the device-resident solver, not on this. Moved out, into its own anonymous namespace above
+the guard. `bicg_polydeg_host_loop` is the gate that covers the moved path; it and
+`bicg_device_loop_identity`, `normfactor_device_identity`, `dilu_single_block_identity`, `pbicgstab`
+and `rho_tutorials_vs_openfoam` are green after the move.
+
+This was a latent portability defect, not a regression: every CUDA 13 build takes the guarded branch,
+so no gate here could see it. The second machine was the test.

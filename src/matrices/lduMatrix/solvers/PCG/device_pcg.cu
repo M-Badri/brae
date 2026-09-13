@@ -129,6 +129,42 @@ void announceNormFactorMode()
                                    : "  normFactor: device-resident, never read by the host; BRAE_NORMFACTOR_HOST=1 restores the read\n");
 }
 
+namespace {
+// Moved OUT of the BRAE_HAS_GS_DEVICE block 2026-09-13: nothing in the series needs CUDA 13's
+// conditional graphs -- it is host code launching per-cell kernels -- but it was defined inside that
+// guard and used by the HOST loop below, which is the path a CUDA 12 toolkit takes. brae did not
+// compile on CUDA 12.8 at all (`identifier "neumannPrecon" is undefined`, found building for sm_90
+// on a GH200). The guard belongs on the device-resident solver, not on this.
+// THE TRUNCATED NEUMANN SERIES PRECONDITIONER (device_pcg.cuh has the measurement that chose it).
+//
+//     M^-1 r = sum_{j<deg} (I - D^-1 A)^j D^-1 r
+//
+// evaluated by the Horner-free recurrence the series is: t_0 = D^-1 r, w = t_0, and then
+// t_{j+1} = (I - D^-1 A) t_j with w += t_{j+1}. deg-1 sparse matrix-vector products, and every other
+// operation is per-cell. Nothing is ordered, nothing is factorised, nothing depends on another cell --
+// which is the entire point against DILU, whose apply is a launch per dependency level.
+//
+// t and At are the caller's, not local, so the whole thing is capturable in the BiCGStab conditional
+// graph: a buffer allocated inside a captured region would bake a freed address into every replay.
+void neumannPrecon(
+    const DeviceLduView& A,
+    int deg,
+    const DeviceBuffer<scalar>& in,
+    DeviceBuffer<scalar>& out,
+    DeviceBuffer<scalar>& t,
+    DeviceBuffer<scalar>& At)
+{
+    deviceJacobi(out, in, A.diag);                 // t_0 = D^-1 r, and the series' first term
+    if (deg <= 1) return;
+    deviceCopy(t, out);
+    for (int j = 1; j < deg; ++j)
+    {
+        deviceAmul(A, t, At);                      // t <- t - D^-1 A t, then w += t
+        deviceNeumannStep(t, At, A.diag, out);
+    }
+}
+}   // namespace
+
 #ifdef BRAE_HAS_GS_DEVICE
 // ---------------------------------------------------------------------------------------------------
 // OpenFOAM's PBiCGStab loop on the device. The host loop below is exact but reads the residual back TWICE
@@ -239,34 +275,6 @@ struct BiCGGraphCache
 };
 
 // Returns false when this path does not apply (the caller then runs the host loop).
-// THE TRUNCATED NEUMANN SERIES PRECONDITIONER (device_pcg.cuh has the measurement that chose it).
-//
-//     M^-1 r = sum_{j<deg} (I - D^-1 A)^j D^-1 r
-//
-// evaluated by the Horner-free recurrence the series is: t_0 = D^-1 r, w = t_0, and then
-// t_{j+1} = (I - D^-1 A) t_j with w += t_{j+1}. deg-1 sparse matrix-vector products, and every other
-// operation is per-cell. Nothing is ordered, nothing is factorised, nothing depends on another cell --
-// which is the entire point against DILU, whose apply is a launch per dependency level.
-//
-// t and At are the caller's, not local, so the whole thing is capturable in the BiCGStab conditional
-// graph: a buffer allocated inside a captured region would bake a freed address into every replay.
-void neumannPrecon(
-    const DeviceLduView& A,
-    int deg,
-    const DeviceBuffer<scalar>& in,
-    DeviceBuffer<scalar>& out,
-    DeviceBuffer<scalar>& t,
-    DeviceBuffer<scalar>& At)
-{
-    deviceJacobi(out, in, A.diag);                 // t_0 = D^-1 r, and the series' first term
-    if (deg <= 1) return;
-    deviceCopy(t, out);
-    for (int j = 1; j < deg; ++j)
-    {
-        deviceAmul(A, t, At);                      // t <- t - D^-1 A t, then w += t
-        deviceNeumannStep(t, At, A.diag, out);
-    }
-}
 
 bool deviceJacobiBiCGStabGraph(const DeviceLduView& A, const DeviceBuffer<scalar>& b, DeviceBuffer<scalar>& psi,
                                const scalar* dNormFactor, scalar tol, scalar relTol, int maxIter, int minIter,

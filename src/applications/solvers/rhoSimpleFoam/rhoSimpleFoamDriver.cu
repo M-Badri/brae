@@ -1172,6 +1172,32 @@ int runMirrorCuda(const std::string& caseDir)
         if (r.count("pIters")) std::printf("   pIters %.0f", res("pIters"));
         if (r.count("uIters")) std::printf("   uIters %.0f", res("uIters"));
         std::printf("\n");
+        // T-5: A RESIDUAL THAT IS NOT FINITE MEANS THE RUN HAS DIVERGED, and every iteration after it
+        // is noise. Measured 2026-09-13 on squareBend at 112k run subsonic (transonic no, 0.1 kg/s):
+        // this arm completed all 100 iterations printing `e nan p nan k nan` and reported a wall time,
+        // while OpenFOAM on the same input aborted around iteration 19 on its thermo inversion. A solver
+        // that keeps going and hands back a number for a run that computed nothing is the silent
+        // substitution this project refuses everywhere else, so it refuses here too. The residuals are
+        // already on the host for the line above, so the check costs nothing.
+        // BRAE_ALLOW_NONFINITE=1 runs on anyway -- the control arm of tests/rho_nonfinite_refusal.sh.
+        {
+            static const bool allowNonFinite =
+                std::getenv("BRAE_ALLOW_NONFINITE") && std::string(std::getenv("BRAE_ALLOW_NONFINITE")) == "1";
+            if (!allowNonFinite)
+            {
+                for (const auto& kv : r)
+                {
+                    if (std::isfinite(static_cast<double>(kv.second))) continue;
+                    throw std::runtime_error(
+                        "brae rhoSimpleFoam (mirror): the residual for '" + kv.first + "' is "
+                        + (std::isnan(static_cast<double>(kv.second)) ? "nan" : "infinite") + " at "
+                        + WriteControl::timeName(wc.timeValue(iter))
+                        + ". The run has diverged; every iteration after this one is noise, and a wall "
+                          "time for it would be a wall time for a run that computed nothing. OpenFOAM "
+                          "aborts on the same input. Set BRAE_ALLOW_NONFINITE=1 to run on regardless.");
+                }
+            }
+        }
         // Foam::bound's message, on the iterations where the guard fired. This driver's summary line is
         // its own format rather than OpenFOAM's, so the bounding lines follow it instead of being
         // interleaved with per-field solve lines that do not exist here -- but the LINE is OpenFOAM's,
