@@ -1195,9 +1195,31 @@ int runMirrorCuda(const std::string& caseDir)
             deviceDiv(dev.dm, dev.f.phiInt, dev.f.phiBnd, contErr);
             deviceHadamard(R, contErr, dev.dm.V);
             const DeviceBuffer<scalar>& ones = deviceOnes(dev.dm.nCells);
-            const scalar sumV     = deviceDot(dev.dm.V, ones);
-            const scalar sumLocal = hf.deltaT * deviceSumMag(R) / sumV;
-            const scalar global   = hf.deltaT * deviceDot(R, ones) / sumV;
+            // THREE BLOCKING READS BECAME ONE MAILBOX READ, and sum(V) is not one of them any more.
+            // Each `deviceDot`/`deviceSumMag` ends in a blocking 8-byte copy that drains the queue and
+            // leaves the host to refill it: measured on squareBend at about 0.23 ms apiece, 0.9 ms per
+            // iteration for the four this report and its neighbours made. sum(V) is a property of the
+            // MESH, so it is computed once and kept until the mesh's volume buffer is replaced (a move
+            // swaps it, which is the only thing that changes it -- refreshDeviceMeshGeometry).
+            static const scalar* sumVKey = nullptr;
+            static scalar sumVCached = 0;
+            if (sumVKey != dev.dm.V.data())
+            {
+                sumVCached = deviceDot(dev.dm.V, ones);
+                sumVKey = dev.dm.V.data();
+            }
+            const scalar sumV = sumVCached;
+            DeviceBuffer<scalar> twoV(2);
+            deviceSumMagInto(R, twoV.data());
+            deviceDotInto(R, ones, twoV.data() + 1);
+            scalar sumMagR = 0, dotR = 0;
+            const DeviceReadValue rv2[2] = {
+                {twoV.data(),     &sumMagR, false},
+                {twoV.data() + 1, &dotR,    false},
+            };
+            deviceReadValues(rv2, 2);
+            const scalar sumLocal = hf.deltaT * sumMagR / sumV;
+            const scalar global   = hf.deltaT * dotR / sumV;
             cumulativeContErr += global;
             std::printf("time step continuity errors : sum local = %g, global = %g, cumulative = %g\n",
                         sumLocal, global, cumulativeContErr);

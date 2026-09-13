@@ -735,7 +735,18 @@ COMPONENTS = {
                   "across 17 gaps, 38 per gap, because only the SOLVERS are captured into graphs while "
                   "the assemblies, boundary updates and reporting are not -- plus one blocking "
                   "reduction per iteration feeding the flow-rate inlet (463 us). So the transonic tail "
-                  "belongs to the launch-floor row, not to the V-cycle."),
+                  "belongs to the launch-floor row, not to the V-cycle. WHAT THE HOST IS DOING, counted on "
+                  "squareBend (2026-09-13): 49.6 blocking cudaMemcpy per iteration at 7.04 ms of API time, 5 "
+                  "cudaDeviceSynchronize at 1.39, and 1,004 cudaLaunchKernel at 4.45. Two wasteful items "
+                  "were removed -- the SIMPLEC row sum built and uploaded a host vector of nCells ones on "
+                  "EVERY iteration (a blocking 896 KB copy, 0.53 ms/it, where deviceOnes already existed) "
+                  "and the continuity report recomputed sum(V), a mesh property, and took three blocking "
+                  "reductions where one cached value and one mailbox read do. Blocking operations fell 54.6 "
+                  "-> 50.6 per iteration and their API time 8.43 -> 6.80 ms. THE WALL DID NOT MOVE, and that "
+                  "is the lesson: a blocking copy's API duration is mostly the host waiting for work the GPU "
+                  "would do anyway, not idle GPU. The idle GPU is the 2.4 ms/it of gaps where the host issues "
+                  "~38 kernels apiece, and closing those needs whole-phase graph capture, whose prerequisite "
+                  "is hoisting the assemblies' pool-allocated temporaries into a stable workspace."),
 
         dict(name="dispatch", of_symbol="controlDict application",
              of_file="applications/solvers/incompressible/simpleFoam/simpleFoam.C",

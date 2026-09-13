@@ -221,9 +221,13 @@ void consistentPressurePredictor(
     {
         // H1 is the row sum of the off-diagonals, obtained as A*1 -- the matrix applied to a vector of
         // ones -- which is how the incompressible twin gets it and is gated there.
-        DeviceBuffer<scalar> ones, rowSum;
-        ones.copyFrom(std::vector<scalar>(static_cast<std::size_t>(nC), scalar(1)));
-        deviceAmul(deviceLduView(dm, D, UEqn.upper, UEqn.lower), ones, rowSum);
+        // deviceOnes: built on the device once per size and kept. This was a host vector of nCells
+        // doubles filled and uploaded on EVERY iteration -- a blocking 896 KB copy on squareBend at
+        // 112,000 cells, measured at 0.53 ms per iteration, which is what a blocking copy costs when it
+        // drains a queue the host then has to refill. The incompressible twin (simpleFoam/pEqn.cu:186)
+        // already took the device one.
+        DeviceBuffer<scalar> rowSum;
+        deviceAmul(deviceLduView(dm, D, UEqn.upper, UEqn.lower), deviceOnes(nC), rowSum);
         deviceSimplecRAtU(dm, rowSum, D, st.rAtU);
     }
 

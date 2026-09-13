@@ -700,3 +700,47 @@ So the transonic tail of FP-12 is not a V-cycle question. The two things worth d
 FP-10's -- capture the assembly phases, whose addressing is mesh-constant, the way the solvers already
 are -- and, second order, extending the contiguous-row layout to the FP64 SpMV so the asymmetric path
 gets what the symmetric one just got.
+
+## FP-10 / FP-8: what the host is really doing, and what removing two of its stalls was worth (2026-09-13)
+
+FP-10 says the iteration is launch-bound and wants the assembly phases captured into graphs. Before
+writing that, the host side was counted properly on squareBend (112,000 cells, 20 iterations under
+nsys, NVTX phases):
+
+| host operation                  | per iteration | API time per iteration |
+|---------------------------------|--------------:|-----------------------:|
+| blocking `cudaMemcpy`           |          49.6 |                 7.04 ms |
+| `cudaDeviceSynchronize`         |           5.0 |                 1.39 ms |
+| `cudaLaunchKernel`              |         1,004 |                 4.45 ms |
+
+Two of those blocking copies were plainly wasteful and are now gone.
+
+- THE SIMPLEC ROW SUM built a host vector of nCells doubles, filled it with ones and uploaded it on
+  EVERY iteration -- a blocking 896 KB copy, 0.53 ms of API time per iteration on this mesh. There has
+  been a device-resident `deviceOnes` all along, and the incompressible twin already used it.
+- THE CONTINUITY REPORT made three blocking reductions per iteration, one of which was sum(V) -- a
+  property of the mesh, recomputed every time. It now computes sum(V) once (keyed on the volume buffer,
+  which only a mesh move replaces) and takes the other two through one mailbox read instead of two
+  blocking copies.
+
+Measured, same case, same profile: blocking host operations 54.6 to 50.6 per iteration and their API
+time 8.43 to 6.80 ms, with the time outside the four phases 3.91 to 2.65. 21 gates covering the
+continuity line, the SIMPLEC path, the tutorials and run-to-run identity pass.
+
+AND THE WALL DID NOT MOVE: 18.1 / 18.1 / 18.9 ms per iteration before, 18.4 / 18.4 / 19.3 after, which
+is noise. That is the finding, and it corrects how the earlier numbers should be read.
+
+A blocking copy's API duration is NOT idle-GPU time. Most of it is the host waiting for work the GPU
+was going to do anyway; removing the wait does not remove the work. The waste is only where the GPU
+sits IDLE, and that was measured separately by bracketing the gaps: 2.4 ms per iteration inside the
+pressure phase, in windows where the host is issuing about 38 kernels apiece while the GPU has nothing
+queued. Removing 4 of some 55 drains moves that by about its share, which is inside the run-to-run
+noise. The two fixes are kept because they are right -- less host work, fewer drains, a wasteful upload
+gone -- not because they made this case faster.
+
+So FP-10's premise survives but its lever has to be the one that makes a REFILL cheap, not the one that
+removes a few drains: capturing whole phases, so that after any unavoidable read the host re-arms the
+GPU with one graph launch instead of dozens of kernel launches. The blocker for that is the assembly's
+temporaries: they are pool-allocated per call, so their addresses are not stable across iterations and
+a captured graph would replay against freed memory. Hoisting them into a per-solver workspace is the
+prerequisite, and it is the next piece of work on this row.
