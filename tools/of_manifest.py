@@ -724,7 +724,18 @@ COMPONENTS = {
                   "half is already sequential in the face arrays but its neighbour half is read through "
                   "losort. Bit-identical over 100 iterations on injectorPipe, squareBend, "
                   "aerofoilNACA0012 and squareBendLiq; BRAE_AMG_CSR=0 restores the face form and "
-                  "BRAE_AMG_CSR_BELOW restricts it by grid size."),
+                  "BRAE_AMG_CSR_BELOW restricts it by grid size. THE TRANSONIC PATH IS A DIFFERENT "
+                  "QUESTION (measured 2026-09-13): an asymmetric pressure matrix runs the FP64 cycle "
+                  "with the two-stage Gauss-Seidel smoother, so the row layout -- built for the FP32 "
+                  "mirrors -- never applies there; its FP64 SpMV is 1.41 of squareBend's pressure phase "
+                  "(4.58 GPU ms per iteration) and would take the same 37%. But that phase is only 38% "
+                  "GPU-BUSY under nsys, and so is injectorPipe's: the four phases are 10.92 busy of "
+                  "23.41 wall on squareBend and 12.64 of 25.64 on injectorPipe (about 60% and 75% "
+                  "unprofiled). The idle time is host launch throughput -- 656 cudaLaunchKernel calls "
+                  "across 17 gaps, 38 per gap, because only the SOLVERS are captured into graphs while "
+                  "the assemblies, boundary updates and reporting are not -- plus one blocking "
+                  "reduction per iteration feeding the flow-rate inlet (463 us). So the transonic tail "
+                  "belongs to the launch-floor row, not to the V-cycle."),
 
         dict(name="dispatch", of_symbol="controlDict application",
              of_file="applications/solvers/incompressible/simpleFoam/simpleFoam.C",

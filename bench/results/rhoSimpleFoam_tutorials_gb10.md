@@ -650,3 +650,53 @@ default is every grid rather than the coarse ones this row started with.
 BIT-IDENTITY: every residual line over 100 iterations matches the face form on injectorPipe,
 squareBend, aerofoilNACA0012 and squareBendLiq. 34 gates covering the AMG, the PCG and BiCGStab
 drivers, the transonic path, determinism, run-to-run identity and the tutorials pass at their bounds.
+
+## FP-12, the transonic tail: it is not a V-cycle problem, it is the host (2026-09-13)
+
+squareBend is the one case the row layout did not help, so it was profiled on its own. Two findings.
+
+FIRST, its V-cycle is a different one. The transonic pressure matrix is asymmetric, and that path runs
+the FP64 cycle with the two-stage Gauss-Seidel smoother, not the FP32 weighted-Jacobi cycle the other
+tutorials take. The contiguous-row layout is built for the FP32 mirrors, so it never applied here. What
+it would be worth is measurable: the FP64 SpMV is 1.41 of the pressure phase's 4.58 GPU ms per
+iteration (2.46 ms across the whole iteration), and the FP32 one gained 37% from the same change.
+
+SECOND, and this reframes the row: the GPU is idle for most of the phase.
+
+| phase (nsys, 20 iterations) | squareBend wall / busy | injectorPipe wall / busy |
+|-----------------------------|-----------------------:|-------------------------:|
+| UEqn                        |  3.74 / 2.20 ms  (59%) |    4.28 / 3.07 ms  (72%) |
+| EEqn                        |  2.81 / 1.16 ms  (41%) |    2.96 / 1.52 ms  (52%) |
+| pEqn                        | 11.98 / 4.58 ms  (38%) |   14.59 / 5.55 ms  (38%) |
+| turbulence                  |  4.88 / 2.99 ms  (61%) |    3.82 / 2.50 ms  (65%) |
+
+The profiler inflates the host side, so the honest unprofiled figures are the GPU-busy column against
+the plain four-phase wall: about 60% on squareBend (10.9 of 18.1 ms) and about 75% on injectorPipe
+(12.6 of 16.8). Either way the pressure phase is the worst of the four on both cases, at 38%.
+
+WHERE THE IDLE TIME IS, measured by bracketing every gap over 60 us in the pressure phase with the
+kernels either side of it, over 20 iterations:
+
+| between                            | count | total ms | mean us |
+|------------------------------------|------:|---------:|--------:|
+| the AMG build (once)               |     1 |     73.4 |  73,401 |
+| publishValues -> scalarCopy        |    17 |     13.2 |     774 |
+| reciprocalV -> amul                |    20 |     12.2 |     609 |
+| finalSum -> frUpdate               |    19 |      8.8 |     463 |
+| bicgEndCond -> scalarCopy          |     9 |      3.5 |     388 |
+| bicgMidCond -> zero                |     9 |      3.4 |     378 |
+
+Excluding the one-off hierarchy build, that is 2.4 ms per iteration of idle GPU inside the pressure
+phase alone. The mailbox spin is not the cause -- it is a tight busy-wait with no backoff. Attributing
+the API calls inside those windows says what is: 656 `cudaLaunchKernel` calls across 17 gaps, about 38
+launches per gap, plus a graph launch at 68 us apiece. The host cannot issue work as fast as the GPU
+retires it, because the kernels are short and only the SOLVERS are captured into graphs. The
+assemblies, the boundary updates and the reporting are not.
+
+`finalSum -> frUpdate` at 463 us once per iteration is its own item: a blocking reduction feeding the
+flow-rate inlet condition, which is FP-9's row, and it is worth half a millisecond per iteration here.
+
+So the transonic tail of FP-12 is not a V-cycle question. The two things worth doing on this case are
+FP-10's -- capture the assembly phases, whose addressing is mesh-constant, the way the solvers already
+are -- and, second order, extending the contiguous-row layout to the FP64 SpMV so the asymmetric path
+gets what the symmetric one just got.
