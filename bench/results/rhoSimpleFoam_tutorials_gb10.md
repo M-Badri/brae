@@ -738,9 +738,29 @@ queued. Removing 4 of some 55 drains moves that by about its share, which is ins
 noise. The two fixes are kept because they are right -- less host work, fewer drains, a wasteful upload
 gone -- not because they made this case faster.
 
-So FP-10's premise survives but its lever has to be the one that makes a REFILL cheap, not the one that
-removes a few drains: capturing whole phases, so that after any unavoidable read the host re-arms the
-GPU with one graph launch instead of dozens of kernel launches. The blocker for that is the assembly's
-temporaries: they are pool-allocated per call, so their addresses are not stable across iterations and
-a captured graph would replay against freed memory. Hoisting them into a per-solver workspace is the
-prerequisite, and it is the next piece of work on this row.
+A THIRD BLOCKING SITE WENT WITH THEM, and it also confirmed the reading. The compressible stress term
+copied each velocity-gradient component into the 9*nC tensor with a BLOCKING device-to-device
+`cudaMemcpy` -- nine per momentum assembly, in a phase measured at 59% GPU-busy -- where its two
+siblings (`deviceGradU`, `deviceLeastSquaresGradU`) use the async form on the per-thread stream. It is
+now async too. Same bytes, same order, same bits, and 40 gates covering the momentum assembly, the
+stress term, the closures and the tutorials pass. The wall, again, did not move: squareBend runs 200
+iterations in 4.42 / 4.44 / 4.52 s against 4.41 / 4.43 before.
+
+That was also the one operation that made the momentum assembly impossible to capture into a graph: a
+blocking copy is illegal during stream capture. So the assembly is now capture-safe, and it does no
+host reads at all.
+
+WHERE THE HOST TIME ACTUALLY IS, after three fixes that each removed real blocking work and none of
+which moved the clock: the launch API itself. squareBend issues 1,004 `cudaLaunchKernel` calls per
+iteration costing 4.45 ms of API time, against about 19 ms per iteration of wall and 11 of GPU-busy.
+Removing 13 blocking operations per iteration did nothing because the time they occupied was mostly
+waiting for work the GPU still has to do; the 1,004 launches are not waiting for anything, they ARE the
+host's work. A captured phase replays at about 0.7 us per node against 4.4 us per launch, which is why
+the capture is worth roughly 3.7 ms per iteration here and the drain-removal was worth nothing.
+
+The prerequisite stands and is now the whole of the remaining work on this row: the assemblies'
+temporaries are pool-allocated per call, so their addresses are not stable across iterations and a
+captured graph would replay against whatever the pool later hands to someone else. They have to be
+hoisted into a per-solver workspace -- 155 buffer declarations across the five assembly files -- before
+any phase can be captured safely. The momentum assembly is the natural first one: it is capture-safe
+as of this change, it has no host reads, and it is 144 launches per iteration.

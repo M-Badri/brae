@@ -365,9 +365,14 @@ void deviceDivDevReff(
             else interfaceAddGrad(*ami, *Uc[i], dm.V, gx, gy, gz);
         }
 
-        cudaCheck(cudaMemcpy(gradU.data() + (0*3+i)*nC, gx.data(), nC*sizeof(scalar), cudaMemcpyDeviceToDevice), "ddr g");
-        cudaCheck(cudaMemcpy(gradU.data() + (1*3+i)*nC, gy.data(), nC*sizeof(scalar), cudaMemcpyDeviceToDevice), "ddr g");
-        cudaCheck(cudaMemcpy(gradU.data() + (2*3+i)*nC, gz.data(), nC*sizeof(scalar), cudaMemcpyDeviceToDevice), "ddr g");
+        // ASYNC on the per-thread stream, ordered before the consumer, as deviceGradU and
+        // deviceLeastSquaresGradU do it. These were BLOCKING copies -- nine per momentum assembly, each
+        // draining the queue and leaving the host to refill it, inside a phase measured at 59% GPU-busy
+        // -- and a blocking copy is also what makes this function impossible to capture into a graph,
+        // which is where FP-10's row is headed. Same bytes, same order, same bits.
+        cudaCheck(cudaMemcpyAsync(gradU.data() + (0*3+i)*nC, gx.data(), nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread), "ddr g");
+        cudaCheck(cudaMemcpyAsync(gradU.data() + (1*3+i)*nC, gy.data(), nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread), "ddr g");
+        cudaCheck(cudaMemcpyAsync(gradU.data() + (2*3+i)*nC, gz.data(), nC*sizeof(scalar), cudaMemcpyDeviceToDevice, cudaStreamPerThread), "ddr g");
         *ub[i] = std::move(bval);
     }
 

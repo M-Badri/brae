@@ -288,7 +288,16 @@ COMPONENTS = {
                         "negative control that both fire",
              note="FIRST component extracted onto the mirrored architecture; the template for the rest. "
                   "The _cpp reference is host-only and reuses brae existing transpose/dev2/operator* "
-                  "rather than restating them."),
+                  "rather than restating them. SPEED, FP-10 (2026-09-13): the device form copied each "
+                  "velocity-gradient component into the 9*nC tensor with a BLOCKING device-to-device "
+                  "cudaMemcpy -- nine per momentum assembly -- where deviceGradU and "
+                  "deviceLeastSquaresGradU next to it use the async form on the per-thread stream. Now "
+                  "async: same bytes, same order, same bits. It did not move the clock (squareBend, 200 "
+                  "iterations: 4.42/4.44/4.52 s against 4.41/4.43), because a blocking copy's cost is "
+                  "mostly waiting for work the GPU has to do anyway -- but it was the ONE operation "
+                  "that made this assembly impossible to capture into a CUDA graph, since a blocking "
+                  "copy is illegal during stream capture. The momentum assembly is now capture-safe and "
+                  "does no host reads, which is the prerequisite FP-10's row needs."),
         dict(name="singlePhaseTransportModel", of_symbol="Foam::singlePhaseTransportModel",
              of_file="src/transportModels/incompressible/singlePhaseTransportModel/"
                      "singlePhaseTransportModel.C",
