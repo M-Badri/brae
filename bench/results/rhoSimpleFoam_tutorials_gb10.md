@@ -1265,3 +1265,121 @@ Gates: `bicg_device_loop_identity`, `bicg_polydeg_host_loop`, `normfactor_device
 `rho_sbmatched_transient_vs_openfoam`, `rho_gradp_lsq_simplec_vs_openfoam`, `rho_kepsilon_cuda`,
 `rho_eeqn_cuda_{e,e_turbulent,h}`, `kepsilon{,_eqn,_correct}`, `komega_coeffs`, `gpu_komega_sst`
 and `rho_tutorials_vs_openfoam` -- 24 of 24 green.
+
+## The small-mesh launch floor, measured on aerofoilNACA0012 (2026-09-13)
+
+16,000 cells, 100 iterations. Whole run 1.02 s, of which about 0.4 s is startup; the solve loop is
+roughly 6 ms/it. With the phase timer (which costs ~1.4 ms/it in syncs of its own):
+
+| phase | ms/it | of which the linear solve |
+|---|---:|---:|
+| UEqn | 1.2 | 0.6 |
+| EEqn | 1.0 | 0.3 |
+| pEqn | 3.5 | **2.5** |
+| turbulence | 1.7 | |
+| four total | 7.4 | |
+
+Under nsys with graph-node tracing the four phases are 8.92 ms/it of wall against 4.36 ms/it of GPU
+busy -- **49% busy**, 4.56 ms/it idle. Only ~1.6 ms/it of that idle is CUDA API time (574
+`cudaLaunchKernel` per iteration at 1.47 ms/it); the rest is host C++ between launches. The solvers and
+the V-cycle are already graphs: 1,991 kernel instances execute per iteration but only 574 are launched
+by the host, so ~1,400 replay as graph nodes.
+
+The pressure phase is where it sits: **1,499 kernels per iteration, 2.71 ms/it of device time, and
+1,155 of those kernels launch with 32 blocks or fewer** -- 2.10 ms/it spent in kernels too small to
+fill the GPU. The AMG hierarchy on this mesh is eight levels deep (63, 32, 16, 8, 4, 2, 1 blocks, then
+a dense coarsest of n = 55), and `amulCsrFK` costs 1.76-1.94 us at EVERY level regardless of its size:
+the level's work has stopped mattering, only the fact that a kernel ran.
+
+The largest single kernel is the dense coarsest solve:
+
+| kernel | blocks | per iteration | us each | ms/it |
+|---|---:|---:|---:|---:|
+| `coarseLUSolveKernel` | 1 | 15.4 | 30.24 | **0.465** |
+| `coarseLUFactorKernel` | 1 | 1.0 | 86.03 | 0.086 |
+
+TWO CHEAP HYPOTHESES, BOTH FALSIFIED AND BOTH REVERTED:
+
+1. *The factors do not fit in shared memory.* The kernel's own comment records 50 us per call at n = 64
+   from global memory against 9 us from shared, and a block gets 48 KB without asking while
+   DENSE_COARSE_MAX = 96 needs 74 KB -- so taking the 99 KB opt-in this device offers looked free.
+   Measured: no change at all, 30.24 us in both arms. The reason is that this case coarsens to n = 55,
+   which needs 24,200 bytes and was ALREADY in shared. The opt-in would only matter for a coarsest
+   level between 78 and 96, and no case here produces one, so the change carries no measurement and
+   was reverted.
+
+2. *The 2n barriers are the cost.* The two substitutions are 110 sequential steps at n = 55, each ending
+   in a `__syncthreads` across 256 threads. Running them in one warp with `__syncwarp` is the same
+   arithmetic on the same operands (within a step the updated y[i] are distinct and independent), and
+   it measured **34.74 us -- a regression**. With 256 threads each lane already held at most one
+   element; narrowing to 32 lanes cost more in loop trips than the barrier saved. Reverted.
+
+So the 30 us is the dependency chain itself -- 110 steps of a dependent shared read at ~275 ns a step --
+and the floor on this mesh is structural: a hierarchy deep enough that most of its kernels cannot fill
+the GPU, plus the host C++ between the launches that are not yet in graphs. The two levers that remain
+are the ones already named in FP-10 and FP-12: fuse the levels that do not fill the GPU into one kernel
+(FP-12's coarse-hierarchy fusion, built and lost), and capture the assembly phases so the host C++
+between launches disappears. Capturing the momentum assembly alone (`BRAE_CAPTURE_ASSEMBLY=1`, the
+experiment already in the tree) moved the whole run from 1.026 s to 1.013 s, about 1%.
+
+## Mesh-scale sweep and the third-party GPU solvers (2026-09-13)
+
+squareBend, the tutorial's own transonic setting, 100 fixed SIMPLE iterations, solver wall only
+(blockMesh and decomposePar excluded on both sides), `functions` stripped and residualControl removed
+on both. brae on one GB10 GPU; OpenFOAM on 20 Grace cores, `hierarchical (5 2 2)`.
+
+| cells | brae | brae ns/cell | OpenFOAM-20c | OF ns/cell | ratio |
+|---:|---:|---:|---:|---:|---:|
+|   112,000 |  2.4 s | 214 |  4.0 s | 357 | **1.67x** |
+|   504,207 | 11.4 s | 226 | aborted at iteration 5 | - | - |
+|   896,000 | 20.1 s | 224 | 30.7 s | 343 | **1.53x** |
+| 3,024,000 | 73.9 s | 244 | 99.5 s | 329 | **1.35x** |
+
+Relative L2 against OpenFOAM at iteration 100 (a TRAJECTORY comparison at a matched iteration, not a
+converged one -- the two codes solve p differently and take different paths to the same fixed point;
+the converged 896k comparison recorded above agrees to U 7.08e-08):
+
+| cells | U | p | T | k | epsilon |
+|---:|---|---|---|---|---|
+|   112,000 | 9.29e-04 | 7.52e-04 | 8.53e-04 | 9.45e-03 | 8.85e-03 |
+|   896,000 | 1.49e-02 | 1.24e-02 | 5.32e-03 | 1.43e-01 | 1.14e-01 |
+| 3,024,000 | 1.46e-02 | 1.35e-02 | 6.66e-03 | 7.67e-02 | 5.65e-02 |
+
+THE MARGIN NARROWS WITH SIZE, and it is brae that moves: 214 -> 244 ns/cell from 112k to 3.02M, while
+OpenFOAM-20c improves, 357 -> 329, as its 20 cores amortise their decomposition. The launch-floor work
+above is the small-mesh end of the same curve; the large-mesh end is bandwidth.
+
+At 504,207 cells (scale factor 1.65) **OpenFOAM-20c aborted at iteration 5** --
+`Maximum number of iterations exceeded: 100 when starting from T0:999.798 old T:-3.901e+20`, a thermo
+inversion on a diverged temperature. brae ran the same mesh and the same settings to iteration 100 with
+healthy residuals (U 4.47e-03, e 7.23e-03, p 7.34e-04, k 3.54e-03, epsilon 7.22e-04, pIters 6). One
+mesh and one setting: the two codes take different paths through the same fixed point, and this one
+diverged for OpenFOAM's and not for brae's. It is not a general claim about either.
+
+### The third-party GPU linear solvers
+
+Both are installed and both run on GB10, and neither can solve this case's pressure matrix as
+configured. The tutorial is `transonic yes`, which makes the pressure matrix ASYMMETRIC:
+
+| arm | what happened on squareBend 112k, transonic |
+|---|---|
+| **AMGX 2.5.0** (`libamgxFoam.so`, p only) | The wrapper's stock config is PCG + aggregation AMG, a SYMMETRIC solver: the run diverged to a negative temperature. Re-run with BiCGSTAB + aggregation AMG it completes, but takes **414 iterations to reach only 0.62 relative residual** and leaves continuity errors of order 100. Its CLASSICAL AMG path, which is the one that suits this matrix, throws a Thrust error on sm_121 (recorded in `amgxSolver.C` itself). |
+| **PETSc** (`libpetscFoam.so`, p only, `aijcusparse`/`cuda`) | `bcgs` + `gamg` **diverges**: initial residual 0.739 to final residual 10496.7 in 374 iterations, and the case aborts on a negative temperature at iteration 4. Needs `-use_gpu_aware_mpi 0` to start at all on this machine. |
+
+The obvious workaround -- run the arms subsonic, where the pressure matrix is symmetric and stock AMG
+is the right tool -- does not work either: `transonic no` with `massFlowRate 0.1` (the setting
+`run_benchmark.sh` documents as the subsonic one) diverges in BOTH codes at 112k. OpenFOAM-20c aborts
+around iteration 19; **brae runs all 100 iterations carrying NaN and never says so**, which is a
+correctness gap of its own against "refuse rather than silently substitute" and is recorded as T-5.
+
+So there is no honest brae-vs-AMGX-vs-PETSc number yet. Getting one is a configuration project on the
+asymmetric matrix, not a measurement.
+
+### Hardware
+
+Everything here is one NVIDIA GB10 (compute capability 12.1, sm_121) with 20 Grace cores. **There is no
+H100 on this machine**, so no H100 number can be produced from here. Nothing in the harness is
+GB10-specific -- `bench/rhoSimpleFoam/run_benchmark.sh` takes `SIZES`, `ITERS` and `CORES` and needs
+only OpenFOAM and a built brae -- so the same table can be produced on an H100 host as-is. The one
+thing that would want checking there is the AMGX CLASSICAL path, which fails on sm_121 and may well
+work on sm_90.
