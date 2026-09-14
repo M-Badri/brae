@@ -58,6 +58,29 @@ TREND_WARM = {
     "injectorPipe":            [(74650,3.00),(573858,3.67),(2576294,6.50)],
 }
 
+def _save(fig, out):
+    """Write the SVG and an OPAQUE PNG.
+
+    matplotlib writes RGBA PNGs even with a facecolor set, so the padding around the figure keeps an
+    alpha channel. Anything that does not composite it against white -- a dark-mode viewer, some social
+    previews -- shows the background through and the light grey text becomes unreadable. The SVG paints
+    its background explicitly, which is why only the PNG was affected. Flatten it.
+    """
+    fig.savefig(f"{out}.svg", facecolor=SURF, bbox_inches="tight", pad_inches=0.32)
+    fig.savefig(f"{out}.png", facecolor=SURF, bbox_inches="tight", pad_inches=0.32)
+    try:
+        from PIL import Image
+        im = Image.open(f"{out}.png")
+        if im.mode in ("RGBA", "LA"):
+            flat = Image.new("RGB", im.size, SURF)
+            flat.paste(im, mask=im.split()[-1])
+            flat.save(f"{out}.png")
+    except ImportError:
+        pass
+    plt.close(fig)
+    print(f"wrote {out}.png / .svg")
+
+
 def _frame(fig, sub):
     fig.text(0.5, 0.960, "brae - rhoSimpleFoam, re-ported to CUDA",
              fontsize=17, color=INK, fontweight="bold", ha="center", va="top")
@@ -121,10 +144,7 @@ def fig_arms(out):
     fig.text(0.5, 0.028,
              "brae's timer includes that start-up, OpenFOAM's excludes decomposePar.",
              fontsize=8.2, color=INK3, ha="center")
-    for ext in ("png", "svg"):
-        fig.savefig(f"{out}.{ext}", facecolor=SURF, bbox_inches="tight", pad_inches=0.32)
-    plt.close(fig)
-    print(f"wrote {out}.png / .svg")
+    _save(fig, out)
 
 
 def fig_scaling(out, case="aerofoilNACA0012"):
@@ -191,10 +211,7 @@ def fig_scaling(out, case="aerofoilNACA0012"):
     ax.legend(loc="upper left", frameon=False, fontsize=9.5, handletextpad=0.7, labelspacing=0.55)
 
     _frame(fig, f"{case}, 15k to 10M cells.  One GH200 against all 64 Grace cores.")
-    for ext in ("png", "svg"):
-        fig.savefig(f"{out}.{ext}", facecolor=SURF, bbox_inches="tight", pad_inches=0.32)
-    plt.close(fig)
-    print(f"wrote {out}.png / .svg")
+    _save(fig, out)
 
 
 def main(out="brae_benchmark"):
