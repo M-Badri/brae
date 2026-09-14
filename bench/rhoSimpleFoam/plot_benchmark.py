@@ -147,13 +147,16 @@ def fig_scaling(out, case="aerofoilNACA0012"):
     fig = plt.figure(figsize=(9.6, 7.0), dpi=200, facecolor=SURF)
     ax = fig.add_axes([0.115, 0.135, 0.845, 0.635]); ax.set_facecolor(SURF)
 
-    ax.plot(xs, cpu, "-o", lw=2.6, ms=8, color=SERIES[1][1], markeredgecolor=SURF,
-            markeredgewidth=1.6, zorder=3, label="OpenFOAM, 64 Grace cores")
-    ax.plot(xs, cold, "-o", lw=2.6, ms=8, color=SERIES[0][1], markeredgecolor=SURF,
-            markeredgewidth=1.6, zorder=4, label="brae, one GPU (whole run)")
+    # brae is the subject, so it is drawn first, heavier, and listed first. Leading the legend with
+    # OpenFOAM made the top line read as the headline in the first seconds, which is backwards on a
+    # lower-is-better chart.
+    ax.plot(xs, cold, "-o", lw=3.0, ms=8.5, color=SERIES[0][1], markeredgecolor=SURF,
+            markeredgewidth=1.6, zorder=5, label="brae, one GPU (whole run)")
     ax.plot(xs, warm, "--o", lw=2.2, ms=7, color=SERIES[0][1], alpha=.62, markerfacecolor=SURF,
             markeredgecolor=SERIES[0][1], markeredgewidth=1.8, zorder=4,
             label="brae, one GPU (warm, iterations 101-200)")
+    ax.plot(xs, cpu, "-o", lw=2.2, ms=7.5, color=SERIES[1][1], alpha=.85, markeredgecolor=SURF,
+            markeredgewidth=1.6, zorder=3, label="OpenFOAM, 64 Grace cores")
 
     for x, c, w, p_ in RUNS:
         ax.annotate(f"{p_:.0f}s" if p_ >= 10 else f"{p_:.1f}s", (x, p_), textcoords="offset points",
@@ -175,7 +178,9 @@ def fig_scaling(out, case="aerofoilNACA0012"):
     ax.set_yticklabels(["0.5s", "1s", "3s", "10s", "30s", "100s", "300s", "1000s"], fontsize=9)
     ax.yaxis.set_minor_formatter(NullFormatter())
     ax.set_xlabel("cells  (log scale)", fontsize=9.5, labelpad=9)
-    ax.set_ylabel("wall time for 100 SIMPLE iterations  (log scale, lower is better)",
+    # direction belongs in the axis label, not as an arrow inside the plot -- an arrow at the left edge
+    # lands on the first data labels.
+    ax.set_ylabel("wall time for 100 SIMPLE iterations  (log scale, lower is faster)",
                   fontsize=9.5, labelpad=8)
     ax.grid(color=GRID, lw=0.8, zorder=0); ax.set_axisbelow(True)
     for sp in ("top", "right"): ax.spines[sp].set_visible(False)
