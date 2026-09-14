@@ -59,9 +59,9 @@ TREND_WARM = {
 }
 
 def _frame(fig, sub):
-    fig.text(0.012, 0.955, "brae - rhoSimpleFoam, re-ported to CUDA",
-             fontsize=17, color=INK, fontweight="bold", ha="left", va="top")
-    fig.text(0.012, 0.893, sub, fontsize=10.3, color=INK2, ha="left", va="top")
+    fig.text(0.5, 0.960, "brae - rhoSimpleFoam, re-ported to CUDA",
+             fontsize=17, color=INK, fontweight="bold", ha="center", va="top")
+    fig.text(0.5, 0.898, sub, fontsize=10.3, color=INK2, ha="center", va="top")
 
 
 def fig_arms(out):
@@ -145,7 +145,7 @@ def fig_scaling(out, case="aerofoilNACA0012"):
     xs   = [r[0] for r in RUNS]
     cold = [r[1] for r in RUNS]; warm = [r[2] for r in RUNS]; cpu = [r[3] for r in RUNS]
     fig = plt.figure(figsize=(9.6, 7.0), dpi=200, facecolor=SURF)
-    ax = fig.add_axes([0.115, 0.135, 0.845, 0.635]); ax.set_facecolor(SURF)
+    ax = fig.add_axes([0.115, 0.105, 0.845, 0.665]); ax.set_facecolor(SURF)
 
     # brae is the subject, so it is drawn first, heavier, and listed first. Leading the legend with
     # OpenFOAM made the top line read as the headline in the first seconds, which is backwards on a
@@ -187,10 +187,6 @@ def fig_scaling(out, case="aerofoilNACA0012"):
     ax.legend(loc="upper left", frameon=False, fontsize=9.5, handletextpad=0.7, labelspacing=0.55)
 
     _frame(fig, f"{case}, 15k to 10M cells.  One GH200 against all 64 Grace cores.")
-    fig.text(0.012, 0.028,
-             "brae's timer includes its whole start-up; OpenFOAM's excludes decomposePar.  The dashed "
-             "curve is brae's solve alone, so it is an upper bound on the advantage.",
-             fontsize=8.2, color=INK3, ha="left")
     for ext in ("png", "svg"):
         fig.savefig(f"{out}.{ext}", facecolor=SURF, bbox_inches="tight", pad_inches=0.32)
     plt.close(fig)
