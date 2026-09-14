@@ -46,6 +46,18 @@ TREND = {
 def cells(n):
     return f"{n/1e6:.1f}M".replace(".0M", "M") if n >= 1e6 else f"{n//1000}k"
 
+# brae WARM against the same OpenFOAM wall. NOT like-for-like: OpenFOAM's timer excludes decomposePar
+# but still carries MPI start-up and field reads, so these are an UPPER BOUND on brae's advantage until
+# OpenFOAM is measured warm too. Plotted because the gap between the two brae curves is the real subject.
+TREND_WARM = {
+    "aerofoilNACA0012":        [(14938,4.00),(64000,7.00),(1024000,10.37),(10000000,23.03)],
+    "squareBend":              [(14200,4.00),(896000,4.52),(7168000,10.61)],
+    "squareBendLiq":           [(112000,4.25),(896000,5.60),(7168000,10.48)],
+    "squareBendLiqNoNewtonian":[(112000,3.00),(896000,4.77),(7168000,6.67)],
+    "angledDuct":              [(28000,3.00),(437500,3.78),(3500000,6.82)],
+    "injectorPipe":            [(74650,3.00),(573858,3.67),(2576294,6.50)],
+}
+
 def _frame(fig, sub):
     fig.text(0.012, 0.955, "brae - rhoSimpleFoam, re-ported to CUDA",
              fontsize=17, color=INK, fontweight="bold", ha="left", va="top")
@@ -118,7 +130,7 @@ def fig_arms(out):
 
 def fig_scaling(out):
     fig = plt.figure(figsize=(9.8, 7.2), dpi=200, facecolor=SURF)
-    ax2 = fig.add_axes([0.105, 0.115, 0.855, 0.665]); ax2.set_facecolor(SURF)
+    ax2 = fig.add_axes([0.105, 0.135, 0.855, 0.645]); ax2.set_facecolor(SURF)
     for case, pts in TREND.items():
         hero = case == "aerofoilNACA0012"
         xs = [p[0] for p in pts]; vs = [p[1] for p in pts]
@@ -130,11 +142,34 @@ def fig_scaling(out):
         ax2.annotate(f"{vs[-1]:.2f}x", (xs[-1], vs[-1]), textcoords="offset points",
                      xytext=(9, dy), fontsize=9 if hero else 8.2,
                      color="#2a78d6" if hero else INK3, fontweight="bold" if hero else "normal")
+    for case, pts in TREND_WARM.items():
+        hero = case == "aerofoilNACA0012"
+        xs = [p[0] for p in pts]; vs = [p[1] for p in pts]
+        ax2.plot(xs, vs, "--o", lw=2.0 if hero else 1.2, ms=6 if hero else 4,
+                 color="#2a78d6" if hero else INK3, alpha=.55 if hero else .30,
+                 markerfacecolor=SURF, markeredgecolor="#2a78d6" if hero else INK3,
+                 markeredgewidth=1.6 if hero else 1.1, zorder=2)
+    ax2.annotate("23.0x", (1.0e7, 23.03), textcoords="offset points", xytext=(9, -3),
+                 fontsize=9, color="#2a78d6", alpha=.8)
     ax2.axhline(1.0, color=INK3, lw=1.3, zorder=1)
-    ax2.annotate("parity, below this line the CPU wins", (1.35e4, 0.70), fontsize=8.3, color=INK3)
-    ax2.annotate("aerofoilNACA0012", (1.0e7, 8.46), textcoords="offset points", xytext=(-6, 14),
+    ax2.annotate("parity, below this line the CPU wins", (1.35e4, 0.85), fontsize=8.3, color=INK3)
+    ax2.annotate("aerofoilNACA0012", (1.0e7, 8.46), textcoords="offset points", xytext=(-8, -18),
                  fontsize=9.5, color="#2a78d6", fontweight="bold", ha="right")
-    ax2.set_xscale("log"); ax2.set_xlim(1.1e4, 7.0e7); ax2.set_ylim(0.6, 9.6)
+    h = [plt.Line2D([], [], color="#2a78d6", lw=2.4, marker="o", ms=7, markeredgecolor=SURF,
+                    markeredgewidth=1.4, label="brae, whole run"),
+         plt.Line2D([], [], color="#2a78d6", lw=2.0, ls="--", alpha=.6, marker="o", ms=6,
+                    markerfacecolor=SURF, markeredgecolor="#2a78d6", markeredgewidth=1.6,
+                    label="brae warm (iterations 101-200)")]
+    ax2.legend(handles=h, loc="upper left", frameon=False, fontsize=9, handletextpad=0.6)
+    fig.text(0.012, 0.028,
+             "Dashed = brae warm against the SAME OpenFOAM wall, which is not warm itself, so those "
+             "curves are an upper bound. The gap between solid and dashed is brae's start-up.",
+             fontsize=8.2, color=INK3, ha="left")
+    ax2.set_xscale("log"); ax2.set_yscale("log")
+    ax2.set_xlim(1.1e4, 7.0e7); ax2.set_ylim(0.8, 34)
+    ax2.yaxis.set_major_locator(FixedLocator([1, 2, 3, 5, 8, 12, 20, 30]))
+    ax2.set_yticklabels(["1x", "2x", "3x", "5x", "8x", "12x", "20x", "30x"], fontsize=9)
+    ax2.yaxis.set_minor_formatter(NullFormatter())
     ax2.set_xlabel("cells  (log scale)", fontsize=9.5, labelpad=9)
     ax2.set_ylabel("brae speed-up over OpenFOAM on 64 cores", fontsize=9.5, labelpad=8)
     ax2.grid(color=GRID, lw=0.8, zorder=0); ax2.set_axisbelow(True)
