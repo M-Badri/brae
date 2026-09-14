@@ -18,7 +18,12 @@ BRAE="${BRAE:-$HERE/../../build/brae_rhoSimpleFoam}"
 OFBASHRC="${OFBASHRC:-$(ls /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null | head -1)}"
 set +u; source "$OFBASHRC" > /dev/null 2>&1; set -u
 
-SRC="$FOAM_TUTORIALS/compressible/rhoSimpleFoam/$CASE"
+# injectorPipe is nested under gasMixing/, unlike the other five -- the same mapping run_matrix.sh carries.
+case "$CASE" in
+    injectorPipe) SUB="gasMixing/injectorPipe" ;;
+    *)            SUB="$CASE" ;;
+esac
+SRC="$FOAM_TUTORIALS/compressible/rhoSimpleFoam/$SUB"
 [ -d "$SRC" ] || { echo "no tutorial $CASE"; exit 2; }
 rm -rf "$OUT"; cp -r "$SRC" "$OUT"
 rm -rf "$OUT"/0 "$OUT"/[1-9]* "$OUT"/processor* "$OUT"/log.* "$OUT"/dynamicCode
@@ -27,15 +32,26 @@ rm -rf "$OUT"/0 "$OUT"/[1-9]* "$OUT"/processor* "$OUT"/log.* "$OUT"/dynamicCode
 python3 - "$OUT" "$CASE" "$TARGET" "$ITERS" "$WI" <<'PY'
 import re, sys, os
 d, case, target, iters, wi = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
-# the aerofoil is extruded: it scales IN PLANE only, so cells go as factor^2
-knobs = {'aerofoilNACA0012': (['zCells','xUCells','xMCells','xDCells'], 2, 16000),
-         'squareBend':       (['LITERAL'], 3, 112000),
-         'squareBendLiq':    (['nxin','nxout','nxbend','ny','nz'], 3, 112000)}
+# Same knobs, exponents and native counts as run_matrix.sh's case_knobs/case_exp, so a clip and a
+# benchmark row at the same target are the same mesh. A leading "/" marks a knob that is a cell SIZE
+# rather than a cell COUNT, and so scales inversely.
+knobs = {'aerofoilNACA0012':          (['zCells','xUCells','xMCells','xDCells'], 2, 16000),
+         'squareBend':                (['LITERAL'], 3, 112000),
+         'squareBendLiq':             (['nxin','nxout','nxbend','ny','nz'], 3, 112000),
+         'squareBendLiqNoNewtonian':  (['nxin','nxout','nxbend','ny','nz'], 3, 112000),
+         'angledDuctExplicitFixedCoeff': (['/cellWidth'], 3, 28000),
+         'injectorPipe':              (['LITERAL'], 3, 74650)}
 f = d + '/system/blockMeshDict'
 if case in knobs and os.path.exists(f):
     names, expo, native = knobs[case]
     factor = (int(target)/native) ** (1.0/expo)
-    factor = float(round(factor)) if factor >= 1.5 else factor
+    inverse = any(k.startswith('/') for k in names)
+    # Snapping the FACTOR is right for a count knob and wrong for a cell-SIZE one. angledDuct's
+    # cellWidth is 5, so a snapped factor reaches only 28,000 (x1) and 437,500 (x2.5) -- the 126,324
+    # rung between them is unreachable. For an inverse knob the integer that has to land is the knob
+    # itself, which the writer below already rounds.
+    if not inverse and factor >= 1.5:
+        factor = float(round(factor))
     s = open(f).read()
     if names == ['LITERAL']:
         s = re.sub(r'\(\s*(\d+)\s+(\d+)\s+(\d+)\s*\)(\s*(?:simple|edge)Grading)',
@@ -43,8 +59,17 @@ if case in knobs and os.path.exists(f):
                                                max(1,round(int(m[3])*factor)), m[4]), s)
     else:
         for k in names:
-            s = re.sub(r'(^\s*%s\s+)(\d+)(\s*;)' % k,
-                       lambda m: '%s%d%s' % (m[1], max(1, round(int(m[2])*factor)), m[3]), s, count=1, flags=re.M)
+            inv = k.startswith('/')
+            nm = k[1:] if inv else k
+            mul = (1.0/factor) if inv else factor
+            def scaled(tok, mul=mul):
+                # a count is written back as a count: blockMesh reads these with an int32 parser and
+                # rejects "41.0" (measured: squareBendLiq and the aerofoil failed to mesh that way)
+                v = float(tok)*mul
+                return str(max(1, int(round(v)))) if '.' not in tok else repr(round(v, 6))
+            s, n = re.subn(r'(^\s*%s\s+)([0-9.]+)(\s*;)' % re.escape(nm),
+                           lambda m: '%s%s%s' % (m[1], scaled(m[2]), m[3]), s, count=1, flags=re.M)
+            if n == 0: sys.stderr.write('knob %s not found in %s\n' % (nm, f))
     open(f, 'w').write(s)
 # KEEP the writes: write often, purge nothing. This is the whole point of the script.
 c = d + '/system/controlDict'; s = open(c).read()
