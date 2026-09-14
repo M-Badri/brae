@@ -128,62 +128,64 @@ def fig_arms(out):
     print(f"wrote {out}.png / .svg")
 
 
-def fig_scaling(out):
-    fig = plt.figure(figsize=(9.8, 7.2), dpi=200, facecolor=SURF)
-    ax2 = fig.add_axes([0.105, 0.135, 0.855, 0.645]); ax2.set_facecolor(SURF)
-    for case, pts in TREND.items():
-        hero = case == "aerofoilNACA0012"
-        xs = [p[0] for p in pts]; vs = [p[1] for p in pts]
-        ax2.plot(xs, vs, "-o", lw=2.4 if hero else 1.5, ms=7 if hero else 5,
-                 color="#2a78d6" if hero else INK3, alpha=1 if hero else .55,
-                 markeredgecolor=SURF, markeredgewidth=1.4, zorder=3 if hero else 2)
-        dy = {"squareBend": 7, "squareBendLiq": -1, "squareBendLiqNoNewtonian": -11,
-              "angledDuct": 6, "injectorPipe": -7}.get(case, -3)
-        ax2.annotate(f"{vs[-1]:.2f}x", (xs[-1], vs[-1]), textcoords="offset points",
-                     xytext=(9, dy), fontsize=9 if hero else 8.2,
-                     color="#2a78d6" if hero else INK3, fontweight="bold" if hero else "normal")
-    for case, pts in TREND_WARM.items():
-        hero = case == "aerofoilNACA0012"
-        xs = [p[0] for p in pts]; vs = [p[1] for p in pts]
-        ax2.plot(xs, vs, "--o", lw=2.0 if hero else 1.2, ms=6 if hero else 4,
-                 color="#2a78d6" if hero else INK3, alpha=.55 if hero else .30,
-                 markerfacecolor=SURF, markeredgecolor="#2a78d6" if hero else INK3,
-                 markeredgewidth=1.6 if hero else 1.1, zorder=2)
-    ax2.annotate("23.0x", (1.0e7, 23.03), textcoords="offset points", xytext=(9, -3),
-                 fontsize=9, color="#2a78d6", alpha=.8)
-    ax2.axhline(1.0, color=INK3, lw=1.3, zorder=1)
-    ax2.annotate("OpenFOAM on 64 cores - below this line the CPU wins", (1.35e4, 0.85),
-                 fontsize=8.3, color=INK3)
+def fig_scaling(out, case="aerofoilNACA0012"):
+    """One case, three curves, absolute seconds.
 
-    # The legend must name BOTH encodings: colour says which case, line style says which timing.
-    # Without the grey entries the five non-hero tutorials are unexplained lines on the plot.
-    h = [plt.Line2D([], [], color="#2a78d6", lw=2.4, marker="o", ms=7, markeredgecolor=SURF,
-                    markeredgewidth=1.4, label="aerofoilNACA0012, whole run"),
-         plt.Line2D([], [], color="#2a78d6", lw=2.0, ls="--", alpha=.6, marker="o", ms=6,
-                    markerfacecolor=SURF, markeredgecolor="#2a78d6", markeredgewidth=1.6,
-                    label="aerofoilNACA0012, warm (iterations 101-200)"),
-         plt.Line2D([], [], color=INK3, lw=1.5, alpha=.55, marker="o", ms=5, markeredgecolor=SURF,
-                    markeredgewidth=1.1, label="the other five tutorials, whole run"),
-         plt.Line2D([], [], color=INK3, lw=1.2, ls="--", alpha=.45, marker="o", ms=4,
-                    markerfacecolor=SURF, markeredgecolor=INK3, markeredgewidth=1.1,
-                    label="the other five tutorials, warm"),
-         plt.Line2D([], [], color=INK3, lw=1.3, label="OpenFOAM on 64 Grace cores = 1x (the baseline)")]
-    ax2.legend(handles=h, loc="upper left", frameon=False, fontsize=8.8, handletextpad=0.6,
-               labelspacing=0.55)
+    The six-case ratio chart carried twelve lines and needed a paragraph to read. This shows ONE
+    tutorial with the CPU as a real curve rather than an invisible baseline at 1x -- the reader sees
+    three lines and the gaps between them are the whole story.
+    """
+    # cells, brae whole run, brae warm, OpenFOAM on 64 cores
+    RUNS = {
+        "aerofoilNACA0012": [(14938, 0.80, 0.44, 1.59), (64000, 1.49, 0.52, 3.55),
+                             (1024000, 11.13, 4.31, 44.62), (10000000, 108.86, 40.00, 920.95)],
+        "squareBend":       [(14200, 0.79, 0.34, 1.17), (896000, 7.03, 2.07, 9.50),
+                             (7168000, 50.94, 10.13, 107.23)],
+    }[case]
+    xs   = [r[0] for r in RUNS]
+    cold = [r[1] for r in RUNS]; warm = [r[2] for r in RUNS]; cpu = [r[3] for r in RUNS]
+    fig = plt.figure(figsize=(9.6, 7.0), dpi=200, facecolor=SURF)
+    ax = fig.add_axes([0.115, 0.135, 0.845, 0.635]); ax.set_facecolor(SURF)
+
+    ax.plot(xs, cpu, "-o", lw=2.6, ms=8, color=SERIES[1][1], markeredgecolor=SURF,
+            markeredgewidth=1.6, zorder=3, label="OpenFOAM, 64 Grace cores")
+    ax.plot(xs, cold, "-o", lw=2.6, ms=8, color=SERIES[0][1], markeredgecolor=SURF,
+            markeredgewidth=1.6, zorder=4, label="brae, one GPU (whole run)")
+    ax.plot(xs, warm, "--o", lw=2.2, ms=7, color=SERIES[0][1], alpha=.62, markerfacecolor=SURF,
+            markeredgecolor=SERIES[0][1], markeredgewidth=1.8, zorder=4,
+            label="brae, one GPU (warm, iterations 101-200)")
+
+    for x, c, w, p_ in RUNS:
+        ax.annotate(f"{p_:.0f}s" if p_ >= 10 else f"{p_:.1f}s", (x, p_), textcoords="offset points",
+                    xytext=(0, 12), ha="center", fontsize=8.6, color=SERIES[1][1], fontweight="bold")
+        ax.annotate(f"{c:.0f}s" if c >= 10 else f"{c:.1f}s", (x, c), textcoords="offset points",
+                    xytext=(0, 12), ha="center", fontsize=8.6, color=SERIES[0][1], fontweight="bold")
+        ax.annotate(f"{w:.0f}s" if w >= 10 else f"{w:.1f}s", (x, w), textcoords="offset points",
+                    xytext=(0, -17), ha="center", fontsize=8.2, color=SERIES[0][1], alpha=.85)
+    # the headline gap, stated once where it is widest
+    xl, cl, wl, pl = RUNS[-1]
+    ax.annotate(f"{pl/cl:.1f}x faster", (xl, (cl*pl) ** 0.5), textcoords="offset points",
+                xytext=(16, -4), fontsize=11, color=INK, fontweight="bold")
+    ax.annotate(f"{pl/wl:.0f}x warm", (xl, (wl*cl) ** 0.5), textcoords="offset points",
+                xytext=(16, -4), fontsize=9, color=SERIES[0][1], alpha=.85)
+
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.set_xlim(1.1e4, 3.2e7); ax.set_ylim(0.3, 2600)
+    ax.yaxis.set_major_locator(FixedLocator([0.5, 1, 3, 10, 30, 100, 300, 1000]))
+    ax.set_yticklabels(["0.5s", "1s", "3s", "10s", "30s", "100s", "300s", "1000s"], fontsize=9)
+    ax.yaxis.set_minor_formatter(NullFormatter())
+    ax.set_xlabel("cells  (log scale)", fontsize=9.5, labelpad=9)
+    ax.set_ylabel("wall time for 100 SIMPLE iterations  (log scale, lower is better)",
+                  fontsize=9.5, labelpad=8)
+    ax.grid(color=GRID, lw=0.8, zorder=0); ax.set_axisbelow(True)
+    for sp in ("top", "right"): ax.spines[sp].set_visible(False)
+    ax.legend(loc="upper left", frameon=False, fontsize=9.5, handletextpad=0.7, labelspacing=0.55)
+
+    _frame(fig, f"{case}, 15k to 10M cells.  One GH200 against all 64 Grace cores.")
     fig.text(0.012, 0.028,
-             "Dashed = brae warm against the SAME OpenFOAM wall, which is not warm itself, so those "
-             "curves are an upper bound. The gap between solid and dashed is brae's start-up.",
+             "brae's timer includes its whole start-up; OpenFOAM's excludes decomposePar.  The dashed "
+             "curve is brae's solve alone, so it is an upper bound on the advantage.",
              fontsize=8.2, color=INK3, ha="left")
-    ax2.set_xscale("log"); ax2.set_yscale("log")
-    ax2.set_xlim(1.1e4, 7.0e7); ax2.set_ylim(0.8, 52)
-    ax2.yaxis.set_major_locator(FixedLocator([1, 2, 3, 5, 8, 12, 20, 30]))
-    ax2.set_yticklabels(["1x", "2x", "3x", "5x", "8x", "12x", "20x", "30x"], fontsize=9)
-    ax2.yaxis.set_minor_formatter(NullFormatter())
-    ax2.set_xlabel("cells  (log scale)", fontsize=9.5, labelpad=9)
-    ax2.set_ylabel("brae speed-up over OpenFOAM on 64 cores", fontsize=9.5, labelpad=8)
-    ax2.grid(color=GRID, lw=0.8, zorder=0); ax2.set_axisbelow(True)
-    for sp in ("top", "right"): ax2.spines[sp].set_visible(False)
-    _frame(fig, "The lead grows with the mesh.  Speed-up over OpenFOAM on all 64 Grace cores.")
     for ext in ("png", "svg"):
         fig.savefig(f"{out}.{ext}", facecolor=SURF, bbox_inches="tight", pad_inches=0.32)
     plt.close(fig)
