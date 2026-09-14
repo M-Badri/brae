@@ -128,16 +128,47 @@ then a directory holding `ld -> /usr/bin/ld.lld` placed FIRST on PATH so `pgaccl
 `ld`. The working GB10 tree carries exactly this as `spuma-fresh/ldshim/ld`, which is how it was found.
 With the shim, `libOpenFOAM.so` links and the error count goes to zero.
 
-**spuma also needs `-gpu=nordc`.** Past the linker, `libfiniteVolume.so` fails with
+**spuma's GPU build fails on a duplicate CUDA registration symbol, and the cause is the PATH.** Past
+the linker, `libfiniteVolume.so` fails with
 
     linkstub.c:7: error: redefinition of `__cudaRegisterLinkedBinary_58_home_ubuntu_spuma_src_
-                          OpenFOAM_lnInclude_FieldFunctions_C_5348'
+                          OpenFOAM_lnInclude_FieldFunctions_C_51a0'
 
--- two device binaries in one link both registering the same source path. It is deterministic, not a
-parallel-build race: identical at `-j 48`, `-j 16` and `-j 8`. The GB10's build log has zero occurrences,
-so it is specific to this tree (the symbol encodes the source path, and the two trees' paths differ in
-length -- 58 characters here against 69 there). `FOAM_EXTRA_CXXFLAGS=-gpu=nordc` turns off relocatable
-device code, which removes the device-link stub that collides, and the build goes straight through.
+`-gpu=nordc` makes that go away and IS NOT A FIX: it removes relocatable device code along with the
+colliding stub, and the resulting binary aborts at start-up with `No CUDA device code available`. It
+builds and it has no GPU in it.
+
+Everything environmental was equalised against the GB10 tree that builds these same sources cleanly,
+and each was ruled out by measurement rather than by argument:
+
+| suspected | result |
+|---|---|
+| build parallelism | identical at `-j 48`, `-j 16`, `-j 8` -- deterministic, not a race |
+| HPC SDK version | pinned 26.5, the GB10's version; unchanged |
+| the ld shim's scope | spuma's own rule applies lld to SHARED LIBS only and GNU ld to executables (lld rejects the `--add-needed` wmake passes when linking an application). Scoped correctly; unchanged |
+| linker version | GH200 had lld 14, the GB10 has 18; installed 18.1.8; unchanged |
+| CUDA pairing | both `/usr/local/cuda -> 13.0` plus the SDK's bundled 13.2; identical |
+
+The symbol encodes the source path -- `58` is the length of
+`/home/ubuntu/spuma/src/OpenFOAM/lnInclude/FieldFunctions.C`, `51a0` a four-hex-digit hash -- and the
+GB10 builds the identical sources at length 69, so the path looked like the last candidate. It is not:
+rebuilt at `/home/ubuntu/spac/spuma-fresh`, the same 69 characters as the working tree, the collision
+returns as `..._69_home_ubuntu_spac_spuma_fresh_..._2371`. (An intermediate run of that rebuild reported
+zero collisions, which was not a fix -- deleting `platforms/` had removed wmake's own `wmkdepend`, so the
+build died before it ever reached a device link.)
+
+SO THIS IS UNRESOLVED, and what remains is a difference that cannot be equalised from here: the GB10's
+`libfiniteVolume.so` was built on 2026-07-05, and the machine now carries a NEWER SDK alongside 26.5. A
+tree whose artifacts predate a toolchain upgrade is not evidence that the toolchain still builds it --
+the honest test is a clean full rebuild of spuma on the GB10, which would say whether this is specific
+to the GH200 or whether the working tree simply has not been rebuilt since. Not run, because it would
+take an hour of someone else's machine.
+
+`-gpu=nordc` remains the only configuration that completes, and it is not usable: no device code.
+
+Also fixed on the way: `wmake/rules/General/Nvidia/link-c++` hardcoded
+`PATH="/home/ghost/space/spuma-fresh/ldshim:$PATH"` -- one machine's absolute path, which travels with
+the tree and silently does nothing anywhere else. Now `$(WM_PROJECT_DIR)/ldshim`.
 
 **Pin the SDK version.** `ls /opt/nvidia/hpc_sdk/Linux_aarch64/*/ | sort -V | tail -1` picks `2026`
 over `26.5`; the GB10's working build pins 26.5. (The GOT failure happens under both, so the version was
@@ -164,3 +195,116 @@ GB10 it was unfixable, since AMGX 2.5.0's classical path throws on sm_121. PETSc
 
 Both arms now use the classical configuration in `run_matrix.sh`, so a comparison against brae is
 finally measuring the libraries at their best on this problem rather than at their defaults.
+
+## brae's memory ceiling: about 4 kB per cell (2026-09-13)
+
+Found by running the ladder past ten million cells on a 97 GB GH200.
+
+    brae cuda: pool cudaMalloc: out of memory
+
+at **29,584,000 cells** (aerofoilNACA0012), against **24,192,000 completed** on squareBend. So the
+ceiling on this card sits between those two, and the footprint is roughly **4 kB per cell**.
+
+IT IS NOT THE POOL, and it is not precision. Both were measured rather than argued:
+
+| | measured |
+|---|---|
+| squareBend, 112,000 cells | 0.381 GB of `cudaMalloc` in 824 calls = **3.56 kB/cell** |
+| aerofoil, 16,000 cells | 0.097 GB = 6.4 kB/cell (the fixed overheads have not amortised yet) |
+| pool efficiency | only **11% idle** in the free list, 6 distinct sizes, 57 blocks -- it recycles well |
+| AMG FP32 + CSR mirrors | disabling the CSR mirror saves **1 MB** at 16k -- not the consumer |
+
+`BRAE_POOL_STATS=1` prints the running totals (`device_buffer.cuh`). The pool keeps a size-exact free
+list and never calls `cudaFree` while enabled, which looks like hoarding and is not: at 6 distinct sizes
+it recycles almost everything it takes.
+
+FP32 IS NOT THE LEVER HERE, for two separate reasons. The solver's agreement with OpenFOAM is the whole
+claim -- the converged 896k comparison is 7.08e-08 in U and the identity gates run at 1e-11 -- and FP32's
+seven digits cannot carry that. And where FP32 IS legitimate, inside the preconditioner (a preconditioner
+changes the iteration count, never the converged answer), brae already uses it: `device_amg.cuh` calls
+them "FP32 mirrors of every level matrix", with `csrSrc` existing to refill them FROM the FP64 arrays.
+They are additions, not replacements, so today they cost memory rather than save it -- and the
+measurement above says they cost about a megabyte, so converting them would not move this.
+
+WHAT THE CEILING COSTS, which is why it now outranks the launch-floor work: at 29,584,000 cells
+OpenFOAM on 64 cores finished in **4,143.9 s** and brae scored nothing. brae's cost per cell is flat at
+108.7 -> 108.9 ns from 1M to 10M, so that rung would have been roughly **320 s -- about 13x**, the
+largest margin anywhere in this campaign, lost to memory rather than to speed.
+
+The next step is attribution, not a guess: tag allocations by call site and rank the consumers. Two
+hypotheses were formed and killed by measurement on the way here (the pool was hoarding; the path length
+drove spuma's symbol collision), which is the argument for measuring this one before touching anything.
+
+## The cross-solver ladder on the GH200 (2026-09-13/14)
+
+One GPU against all 64 Grace cores, 100 fixed SIMPLE iterations, `bench/rhoSimpleFoam/run_matrix.sh`.
+Solver wall only. A row is a time only if the run reached the last iteration.
+
+| case | cells | brae | OpenFOAM-64c | AMGX | PETSc | brae/OF |
+|---|---:|---:|---:|---:|---:|---:|
+| squareBend | 14,200 | 0.8 | 1.2 | 3.5 | 4.5 | **1.48x** |
+| squareBend | 97,470 | 1.4 | stopped at it 4 | 16.9 | 18.7 | - |
+| squareBend | 896,000 | 7.0 | 9.5 | 142.8 | 148.2 | **1.35x** |
+| squareBend | 7,168,000 | 50.9 | 107.2 | 1229.9 | 1278.5 | **2.11x** |
+| squareBend | 24,192,000 | 180.1 | stopped at it 24 | stopped at it 38 | stopped at it 1 | - |
+| squareBendLiq | 112,000 | 1.7 | 1.7 | 21.0 | 23.0 | **0.98x** |
+| squareBendLiq | 896,000 | 6.8 | 8.4 | 151.7 | 157.2 | **1.23x** |
+| squareBendLiq | 7,168,000 | 47.6 | 93.3 | 1354.2 | 1389.6 | **1.96x** |
+| squareBendLiq | 24,192,000 | 166.3 | 336.7 | - | - | **2.02x** |
+| squareBendLiqNoNewtonian | 112,000 | 1.2 | 1.2 | 13.8 | 15.7 | **1.01x** |
+| squareBendLiqNoNewtonian | 896,000 | 5.4 | 6.2 | 106.7 | 112.2 | **1.16x** |
+| squareBendLiqNoNewtonian | 7,168,000 | 39.0 | 68.0 | 936.5 | 972.2 | **1.74x** |
+| squareBendLiqNoNewtonian | 24,192,000 | 131.3 | 242.7 | - | - | **1.85x** |
+| angledDuctExplicitFixedCoeff | 28,000 | 0.7 | 0.9 | 4.2 | 5.3 | **1.21x** |
+| angledDuctExplicitFixedCoeff | 437,500 | 3.5 | 3.4 | 48.3 | 51.8 | **0.96x** |
+| angledDuctExplicitFixedCoeff | 3,500,000 | 23.0 | 34.1 | 445.4 | 467.3 | **1.48x** |
+| aerofoilNACA0012 | 14,938 | 0.8 | 1.6 | 2.9 | 4.0 | **1.99x** |
+| aerofoilNACA0012 | 64,000 | 1.5 | 3.5 | 8.5 | 9.8 | **2.38x** |
+| aerofoilNACA0012 | 1,024,000 | 11.1 | 44.6 | 127.7 | 132.7 | **4.01x** |
+| aerofoilNACA0012 | 10,000,000 | 108.9 | 921.0 | 1482.8 | stopped at it 3 | **8.46x** |
+| aerofoilNACA0012 | 29,584,000 | stopped at OOM | 4143.9 | - | - | - |
+| injectorPipe | 74,650 | 1.4 | 1.5 | 14.1 | 13.6 | **1.09x** |
+| injectorPipe | 573,858 | 5.1 | 5.5 | 110.0 | 110.1 | **1.09x** |
+| injectorPipe | 2,576,294 | 21.5 | 33.8 | 587.4 | 580.2 | **1.57x** |
+
+**brae is faster on 19 of the 21 rungs where both codes completed.**
+
+Three caveats travel with that table and must not be dropped from it:
+
+- **The AMGX and PETSc columns do not measure those libraries.** Both arms run OpenFOAM SERIALLY with only
+  the pressure equation on the GPU, against the `of` arm's 64 cores. That is the whole of their 10-25x
+  deficit. AMGX as built here (`-DCMAKE_NO_MPI=True`) cannot run multi-rank at all. Rebuild AMGX with MPI
+  and run both under `mpirun -np 64` before either column is published.
+- **brae carries its whole cold start; OpenFOAM does not carry `decomposePar`.** The timer wraps brae's
+  entire process -- mesh read, device set-up, AMG hierarchy build, field reads, solve, write -- while the
+  OpenFOAM arm times only `mpirun ... rhoSimpleFoam -parallel`, with decomposePar and reconstructPar
+  outside it. At 24M that partitioning is minutes. The small-mesh rungs are the ones this distorts: brae's
+  start-up measured about 0.4 s of a 1.02 s aerofoil run, so 0.98x and 0.96x are mostly set-up, not solve.
+- `stopped at it 4` on squareBend at 97,470 is the mesh generator, not OpenFOAM: `SNAP` only rounds scale
+  factors at or above 1.5, so the sub-native rungs still get non-integer factors.
+
+## Why spuma has no column: it builds for Blackwell and not for Hopper (2026-09-14)
+
+Root-caused by changing ONE variable. The clean tree on the GB10, same SDK 26.5, same lld 18, same
+sources, same path, relocatable device code on:
+
+| target | result |
+|---|---|
+| `-gpu=cc121` (Blackwell) | `libfiniteVolume.so` **builds clean, 0 collisions** |
+| `-gpu=cc90` (Hopper) | **collision**, `__cudaRegisterLinkedBinary_69_home_ghost_space_spuma_clean_src_OpenFOAM_lnInclude_FieldFunctions_C_7f4f`, build fails |
+
+So it is the TARGET ARCHITECTURE, not the GH200, not the path, not the SDK version, not the linker --
+all of which were equalised and eliminated first. It also explains why the GB10 tree works: it has only
+ever been built cc121.
+
+Two things that look like fixes and are not, both recorded because each cost a cycle:
+
+- `-gpu=nordc` completes the build by removing relocatable device code, and the binary then aborts at
+  start-up with `No CUDA device code available`. It builds and has no GPU in it.
+- `-gpu=cc90a` reports zero collisions because nvc++ 26.5 does not accept it -- valid values are
+  `35 50 60 61 62 70 72 75 80 86 87 88 89 90 100 101 103 110 120 121`, with no `a` suffix. It printed its
+  usage text and stopped, so the build never reached a device link. A zero that means "never got there"
+  is not a zero; the same false negative appeared earlier when a deleted `platforms/` removed wmake's own
+  `wmkdepend`.
+
+The reproducer is now minimal -- one library, one flag, one machine -- and belongs upstream with spuma.

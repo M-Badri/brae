@@ -1,0 +1,32 @@
+{
+    "_comment": [
+        "AMGX for the rhoSimpleFoam pressure equation. TWO choices here are not the wrapper's defaults,",
+        "and both were forced by measurement (2026-09-13):",
+        "  solver FGMRES, not PCG. The tutorials run `transonic yes`, which makes the pressure matrix",
+        "  ASYMMETRIC. The amgxFoam wrapper's built-in config is PCG, a symmetric solver, and it diverges",
+        "  to a negative temperature on squareBend.",
+        "  algorithm CLASSICAL, not AGGREGATION. With aggregation this matrix takes 414 iterations to",
+        "  reach only 0.62 relative residual. With classical it takes 2-4. NOTE: AMGX 2.5.0's classical",
+        "  path throws a Thrust error on sm_121 (GB10) -- see amgxSolver.C -- so this config is usable on",
+        "  sm_90 (GH200) and not on GB10. That is why the AMGX arm was empty until a Hopper box appeared."
+    ],
+    "config_version": 2,
+    "solver": {
+        "scope": "main",
+        "solver": "FGMRES",
+        "gmres_n_restart": 20,
+        "preconditioner": {
+            "scope": "amg", "solver": "AMG", "algorithm": "CLASSICAL",
+            "selector": "PMIS", "interpolator": "D2", "smoother": "BLOCK_JACOBI",
+            "presweeps": 1, "postsweeps": 1, "max_iters": 1, "cycle": "V", "max_levels": 24
+        },
+        "max_iters": 1000,
+        "norm": "L2",
+        "convergence": "RELATIVE_INI",
+        "tolerance": 0.01,
+        "monitor_residual": 1,
+        "print_solve_stats": 0,
+        "obtain_timings": 0,
+        "store_res_history": 0
+    }
+}

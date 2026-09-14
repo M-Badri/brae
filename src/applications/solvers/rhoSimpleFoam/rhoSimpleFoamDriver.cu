@@ -1169,6 +1169,7 @@ int runMirrorCuda(const std::string& caseDir)
                     WriteControl::timeName(wc.timeValue(iter)).c_str(),
                     res("U"), hf.heName.c_str(), res(hf.heName.c_str()), res("p"));
         if (r.count("k")) std::printf("   k %.4e   %s %.4e", res("k"), second.c_str(), res(second.c_str()));
+        if (iter % 25 == 0) brae::detail::devicePool().report("iteration");
         if (r.count("pIters")) std::printf("   pIters %.0f", res("pIters"));
         if (r.count("uIters")) std::printf("   uIters %.0f", res("uIters"));
         std::printf("\n");

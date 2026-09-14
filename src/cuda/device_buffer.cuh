@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <map>          // BRAE_POOL_STATS: allocation-size histogram
+#include <algorithm>    // sort, for the histogram report
 #include <unordered_map>
 #include <cstdlib>
 #include <cstdio>
@@ -54,21 +56,51 @@ public:
             {
                 void* p = it->second.back();
                 it->second.pop_back();
+                heldBytes_ -= bytes;
                 return p;
             }
         }
         void* p = nullptr;
         cudaCheck(cudaMalloc(&p, bytes), "pool cudaMalloc");
+        mallocBytes_ += bytes; ++mallocs_;
+        hist_[bytes].first += bytes; ++hist_[bytes].second;
         return p;
     }
     void give(void* p, std::size_t bytes)
     {
         if (!p) return;
-        if (enabled_ && bytes) free_[bytes].push_back(p);      // retain for reuse; no cudaFree during the run
+        if (enabled_ && bytes) { free_[bytes].push_back(p); heldBytes_ += bytes; }   // retained, never freed
         else cudaFree(p);
+    }
+    // BRAE_POOL_STATS=1: what the pool asked the driver for, and how much of that is sitting in the
+    // free list rather than in use. The list is keyed on EXACT size, so a block is reusable only by a
+    // request of exactly the same byte count -- a run that asks for many distinct sizes retains them all.
+    void report(const char* when) const
+    {
+        if (!std::getenv("BRAE_POOL_STATS")) return;
+        std::size_t sizes = free_.size(), blocks = 0;
+        for (const auto& kv : free_) blocks += kv.second.size();
+        std::fprintf(stderr,
+            "[pool] %-10s cudaMalloc %8.3f GB in %zu calls | idle in free list %8.3f GB "
+            "(%zu distinct sizes, %zu blocks)\n",
+            when, mallocBytes_/1073741824.0, mallocs_, heldBytes_/1073741824.0, sizes, blocks);
+        // The biggest consumers, by total bytes. Sizes are the attribution: a buffer is sized by what it
+        // spans, so nCells*8 is a cell field, nFaces*8 a face field, and the tail of odd sizes is the
+        // AMG hierarchy's coarse levels. Cheaper and more honest than guessing at call sites.
+        std::vector<std::pair<std::size_t, std::pair<std::size_t, std::size_t>>> v(hist_.begin(), hist_.end());
+        std::sort(v.begin(), v.end(),
+                  [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+        const std::size_t n = v.size() < 12 ? v.size() : 12;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            std::fprintf(stderr, "[pool]   %10.2f MB total  %5zu x %10.2f MB\n",
+                         v[i].second.first/1048576.0, v[i].second.second, v[i].first/1048576.0);
+        }
     }
 private:
     std::unordered_map<std::size_t, std::vector<void*>> free_;
+    std::size_t mallocBytes_ = 0, heldBytes_ = 0, mallocs_ = 0;
+    std::map<std::size_t, std::pair<std::size_t, std::size_t>> hist_;   // size -> {total bytes, count}
     bool enabled_;
 };
 inline DevicePool& devicePool() { static DevicePool* p = new DevicePool(); return *p; }   // intentionally leaked
