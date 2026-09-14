@@ -152,21 +152,30 @@ def fig_scaling(out):
     ax2.annotate("23.0x", (1.0e7, 23.03), textcoords="offset points", xytext=(9, -3),
                  fontsize=9, color="#2a78d6", alpha=.8)
     ax2.axhline(1.0, color=INK3, lw=1.3, zorder=1)
-    ax2.annotate("parity, below this line the CPU wins", (1.35e4, 0.85), fontsize=8.3, color=INK3)
-    ax2.annotate("aerofoilNACA0012", (1.0e7, 8.46), textcoords="offset points", xytext=(-8, -18),
-                 fontsize=9.5, color="#2a78d6", fontweight="bold", ha="right")
+    ax2.annotate("OpenFOAM on 64 cores - below this line the CPU wins", (1.35e4, 0.85),
+                 fontsize=8.3, color=INK3)
+
+    # The legend must name BOTH encodings: colour says which case, line style says which timing.
+    # Without the grey entries the five non-hero tutorials are unexplained lines on the plot.
     h = [plt.Line2D([], [], color="#2a78d6", lw=2.4, marker="o", ms=7, markeredgecolor=SURF,
-                    markeredgewidth=1.4, label="brae, whole run"),
+                    markeredgewidth=1.4, label="aerofoilNACA0012, whole run"),
          plt.Line2D([], [], color="#2a78d6", lw=2.0, ls="--", alpha=.6, marker="o", ms=6,
                     markerfacecolor=SURF, markeredgecolor="#2a78d6", markeredgewidth=1.6,
-                    label="brae warm (iterations 101-200)")]
-    ax2.legend(handles=h, loc="upper left", frameon=False, fontsize=9, handletextpad=0.6)
+                    label="aerofoilNACA0012, warm (iterations 101-200)"),
+         plt.Line2D([], [], color=INK3, lw=1.5, alpha=.55, marker="o", ms=5, markeredgecolor=SURF,
+                    markeredgewidth=1.1, label="the other five tutorials, whole run"),
+         plt.Line2D([], [], color=INK3, lw=1.2, ls="--", alpha=.45, marker="o", ms=4,
+                    markerfacecolor=SURF, markeredgecolor=INK3, markeredgewidth=1.1,
+                    label="the other five tutorials, warm"),
+         plt.Line2D([], [], color=INK3, lw=1.3, label="OpenFOAM on 64 Grace cores = 1x (the baseline)")]
+    ax2.legend(handles=h, loc="upper left", frameon=False, fontsize=8.8, handletextpad=0.6,
+               labelspacing=0.55)
     fig.text(0.012, 0.028,
              "Dashed = brae warm against the SAME OpenFOAM wall, which is not warm itself, so those "
              "curves are an upper bound. The gap between solid and dashed is brae's start-up.",
              fontsize=8.2, color=INK3, ha="left")
     ax2.set_xscale("log"); ax2.set_yscale("log")
-    ax2.set_xlim(1.1e4, 7.0e7); ax2.set_ylim(0.8, 34)
+    ax2.set_xlim(1.1e4, 7.0e7); ax2.set_ylim(0.8, 52)
     ax2.yaxis.set_major_locator(FixedLocator([1, 2, 3, 5, 8, 12, 20, 30]))
     ax2.set_yticklabels(["1x", "2x", "3x", "5x", "8x", "12x", "20x", "30x"], fontsize=9)
     ax2.yaxis.set_minor_formatter(NullFormatter())
