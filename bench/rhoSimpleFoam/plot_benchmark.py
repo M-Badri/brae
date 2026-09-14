@@ -142,8 +142,15 @@ def fig_scaling(out, case="aerofoilNACA0012"):
         "squareBend":       [(14200, 0.79, 0.34, 1.17), (896000, 7.03, 2.07, 9.50),
                              (7168000, 50.94, 10.13, 107.23)],
     }[case]
+    # THROUGHPUT, not wall time. On a time axis the slowest arm sits physically highest, so OpenFOAM
+    # crowns the chart and a three-second read says the CPU won. Million cell-iterations per second
+    # inverts that honestly: higher IS faster, so brae warm leads, brae follows, the CPU is at the
+    # bottom, and the ranking on screen matches the ranking in fact.
     xs   = [r[0] for r in RUNS]
-    cold = [r[1] for r in RUNS]; warm = [r[2] for r in RUNS]; cpu = [r[3] for r in RUNS]
+    tp   = lambda n, w: n * 100 / w / 1e6
+    cold = [tp(r[0], r[1]) for r in RUNS]
+    warm = [tp(r[0], r[2]) for r in RUNS]
+    cpu  = [tp(r[0], r[3]) for r in RUNS]
     fig = plt.figure(figsize=(9.6, 7.0), dpi=200, facecolor=SURF)
     ax = fig.add_axes([0.115, 0.105, 0.845, 0.665]); ax.set_facecolor(SURF)
 
@@ -158,29 +165,27 @@ def fig_scaling(out, case="aerofoilNACA0012"):
     ax.plot(xs, cpu, "-o", lw=2.2, ms=7.5, color=SERIES[1][1], alpha=.85, markeredgecolor=SURF,
             markeredgewidth=1.6, zorder=3, label="OpenFOAM, 64 Grace cores")
 
-    for x, c, w, p_ in RUNS:
-        ax.annotate(f"{p_:.0f}s" if p_ >= 10 else f"{p_:.1f}s", (x, p_), textcoords="offset points",
-                    xytext=(0, 12), ha="center", fontsize=8.6, color=SERIES[1][1], fontweight="bold")
-        ax.annotate(f"{c:.0f}s" if c >= 10 else f"{c:.1f}s", (x, c), textcoords="offset points",
-                    xytext=(0, 12), ha="center", fontsize=8.6, color=SERIES[0][1], fontweight="bold")
-        ax.annotate(f"{w:.0f}s" if w >= 10 else f"{w:.1f}s", (x, w), textcoords="offset points",
-                    xytext=(0, -17), ha="center", fontsize=8.2, color=SERIES[0][1], alpha=.85)
-    # the headline gap, stated once where it is widest
-    xl, cl, wl, pl = RUNS[-1]
-    ax.annotate(f"{pl/cl:.1f}x faster", (xl, (cl*pl) ** 0.5), textcoords="offset points",
-                xytext=(16, -4), fontsize=11, color=INK, fontweight="bold")
-    ax.annotate(f"{pl/wl:.0f}x warm", (xl, (wl*cl) ** 0.5), textcoords="offset points",
-                xytext=(16, -4), fontsize=9, color=SERIES[0][1], alpha=.85)
+    for x, cv, wv, pv in zip(xs, cold, warm, cpu):
+        ax.annotate(f"{wv:.1f}", (x, wv), textcoords="offset points", xytext=(0, 12),
+                    ha="center", fontsize=8.2, color=SERIES[0][1], alpha=.85)
+        ax.annotate(f"{cv:.1f}", (x, cv), textcoords="offset points", xytext=(0, 12),
+                    ha="center", fontsize=8.6, color=SERIES[0][1], fontweight="bold")
+        ax.annotate(f"{pv:.1f}", (x, pv), textcoords="offset points", xytext=(0, -17),
+                    ha="center", fontsize=8.6, color=SERIES[1][1], fontweight="bold")
+    ax.annotate(f"{cold[-1]/cpu[-1]:.1f}x faster", (xs[-1], (cold[-1]*cpu[-1]) ** 0.5),
+                textcoords="offset points", xytext=(16, -4), fontsize=11, color=INK, fontweight="bold")
+    ax.annotate(f"{warm[-1]/cpu[-1]:.0f}x warm", (xs[-1], (warm[-1]*cold[-1]) ** 0.5),
+                textcoords="offset points", xytext=(16, -4), fontsize=9, color=SERIES[0][1], alpha=.85)
 
     ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlim(1.1e4, 3.2e7); ax.set_ylim(0.3, 2600)
-    ax.yaxis.set_major_locator(FixedLocator([0.5, 1, 3, 10, 30, 100, 300, 1000]))
-    ax.set_yticklabels(["0.5s", "1s", "3s", "10s", "30s", "100s", "300s", "1000s"], fontsize=9)
+    ax.set_xlim(1.1e4, 3.2e7); ax.set_ylim(0.6, 45)
+    ax.yaxis.set_major_locator(FixedLocator([1, 2, 5, 10, 20, 40]))
+    ax.set_yticklabels(["1", "2", "5", "10", "20", "40"], fontsize=9)
     ax.yaxis.set_minor_formatter(NullFormatter())
     ax.set_xlabel("cells  (log scale)", fontsize=9.5, labelpad=9)
     # direction belongs in the axis label, not as an arrow inside the plot -- an arrow at the left edge
     # lands on the first data labels.
-    ax.set_ylabel("wall time for 100 SIMPLE iterations  (log scale, lower is faster)",
+    ax.set_ylabel("million cell-iterations per second  (log scale, higher is faster)",
                   fontsize=9.5, labelpad=8)
     ax.grid(color=GRID, lw=0.8, zorder=0); ax.set_axisbelow(True)
     for sp in ("top", "right"): ax.spines[sp].set_visible(False)
