@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Render the rhoSimpleFoam benchmark as a static figure (PNG/SVG) for publication.
+"""Render the rhoSimpleFoam benchmark as TWO standalone figures (PNG + SVG each).
+
+Two separate images rather than one two-panel figure: the panels answer different questions and are
+posted separately, and a shared canvas forces them to share a size and a legend they do not both need.
 
 WHY A DOT PLOT AND NOT BARS. The measured walls span 11 s to 1570 s at a single mesh size, so a linear
 bar chart is unreadable and a log-scale BAR is a lie -- a bar's length is read as proportional, and on a
@@ -43,45 +46,48 @@ TREND = {
 def cells(n):
     return f"{n/1e6:.1f}M".replace(".0M", "M") if n >= 1e6 else f"{n//1000}k"
 
-def main(out="brae_benchmark"):
-    plt.rcParams.update({"font.family": "Liberation Sans", "font.size": 10,
-                         "axes.edgecolor": GRID, "text.color": INK,
-                         "axes.labelcolor": INK2, "xtick.color": INK3, "ytick.color": INK3})
-    fig = plt.figure(figsize=(13.2, 7.4), dpi=200, facecolor=SURF)
-    gs = fig.add_gridspec(1, 2, width_ratios=[1.32, 1], wspace=0.30,
-                          left=0.155, right=0.975, top=0.795, bottom=0.115)
+def _frame(fig, sub):
+    fig.text(0.012, 0.955, "brae - rhoSimpleFoam, re-ported to CUDA",
+             fontsize=17, color=INK, fontweight="bold", ha="left", va="top")
+    fig.text(0.012, 0.893, sub, fontsize=10.3, color=INK2, ha="left", va="top")
 
-    # ---- panel 1: dot plot, seconds on a log axis -------------------------------------------
-    ax = fig.add_subplot(gs[0, 0]); ax.set_facecolor(SURF)
+
+def fig_arms(out):
+    """Every arm at the largest mesh all five completed."""
+    fig = plt.figure(figsize=(11.6, 7.2), dpi=200, facecolor=SURF)
+    ax = fig.add_axes([0.235, 0.135, 0.745, 0.615])          # room above for title + legend
+    ax.set_facecolor(SURF)
     ys = list(range(len(PANEL)))[::-1]
-    # DODGE each series onto its own sub-row. AMGX and PETSc land within 4% of one another on every
-    # case -- on a log axis their marks coincide exactly and one hides the other. A fixed vertical
-    # offset per series keeps all five readable without implying an ordering the data does not have.
     DODGE = [0.20, 0.10, 0.0, -0.10, -0.20]
-    brae_xy = []
+    threads = [[] for _ in SERIES]
+    warm_xy = []
     for y, (case, n, vals, warm) in zip(ys, PANEL):
         ax.plot([min(min(vals), warm), max(vals)], [y, y], color=GRID, lw=1.4, zorder=1,
                 solid_capstyle="round")
-        # brae WARM: the same entity in a different state, so the same hue with a hollow mark rather
-        # than a new categorical colour. The bar between the two marks IS the start-up cost.
         ax.plot([warm, vals[0]], [y + DODGE[0]] * 2, color=SERIES[0][1], lw=2.0, alpha=.30, zorder=2)
-        ax.plot([warm], [y + DODGE[0]], "o", ms=8.0, color=SURF, zorder=3,
+        ax.plot([warm], [y + DODGE[0]], "o", ms=8.0, color=SURF, zorder=4,
                 markeredgecolor=SERIES[0][1], markeredgewidth=2.0)
-        for (name, col), v, dy in zip(SERIES, vals, DODGE):
+        warm_xy.append((warm, y + DODGE[0]))
+        for i, ((name, col), v, dy) in enumerate(zip(SERIES, vals, DODGE)):
             ax.plot([v, v], [y, y + dy], color=GRID, lw=0.9, zorder=2)
-            ax.plot([v], [y + dy], "o", ms=8.5, color=col, zorder=3,
+            ax.plot([v], [y + dy], "o", ms=8.5, color=col, zorder=4,
                     markeredgecolor=SURF, markeredgewidth=1.6)
-        brae_xy.append((vals[0], y + DODGE[0]))
-        ax.annotate(f"{vals[0]:.0f}s", (vals[0], y + DODGE[0]), textcoords="offset points", xytext=(0, 10),
-                    ha="center", fontsize=8.5, color=INK, fontweight="bold", zorder=4)
+            threads[i].append((v, y + dy))
+        ax.annotate(f"{vals[0]:.0f}s", (vals[0], y + DODGE[0]), textcoords="offset points",
+                    xytext=(0, 10), ha="center", fontsize=8.5, color=INK, fontweight="bold", zorder=5)
         ax.annotate(f"{warm:.0f}s", (warm, y + DODGE[0]), textcoords="offset points", xytext=(0, 10),
-                    ha="center", fontsize=8, color=SERIES[0][1], zorder=4)
-        ax.annotate(f"{max(vals):.0f}s", (max(vals), y + DODGE[vals.index(max(vals))]),
-                    textcoords="offset points", xytext=(0, 10),
-                    ha="center", fontsize=8.5, color=INK3, zorder=4)
-    # a thin thread through brae across the cases, so the arm reads as one line and not six dots
-    ax.plot([x for x, _ in brae_xy], [y for _, y in brae_xy], color=SERIES[0][1], lw=1.0,
-            alpha=.45, zorder=2)
+                    ha="center", fontsize=8, color=SERIES[0][1], zorder=5)
+        # the slowest arm carries a label too: aqua, yellow and magenta all sit below 3:1 contrast on
+        # this surface, and the validator's relief rule wants them labelled, not left to colour alone.
+        slow = max(vals)
+        ax.annotate(f"{slow:.0f}s", (slow, y + DODGE[vals.index(slow)]), textcoords="offset points",
+                    xytext=(0, 10), ha="center", fontsize=8.2, color=INK3, zorder=5)
+    # a thin thread per arm, so each reads as one series across the six cases
+    for (name, col), pts in zip(SERIES, threads):
+        ax.plot([x for x, _ in pts], [y for _, y in pts], color=col, lw=1.0, alpha=.45, zorder=3)
+    ax.plot([x for x, _ in warm_xy], [y for _, y in warm_xy], color=SERIES[0][1], lw=1.0,
+            alpha=.30, ls=(0, (3, 2)), zorder=3)
+
     ax.set_yticks(ys, [f"{c}\n{cells(n)} cells" for c, n, _, _ in PANEL], fontsize=9.5, color=INK)
     ax.set_xscale("log"); ax.set_xlim(3.2, 4200)
     ax.xaxis.set_major_locator(FixedLocator([5, 10, 30, 100, 300, 1000, 3000]))
@@ -90,13 +96,29 @@ def main(out="brae_benchmark"):
     ax.set_xlabel("wall time for 100 SIMPLE iterations  (log scale, lower is better)",
                   fontsize=9.5, labelpad=9)
     ax.grid(axis="x", color=GRID, lw=0.8, zorder=0); ax.set_axisbelow(True)
-    for s in ("top", "right", "left"): ax.spines[s].set_visible(False)
+    for sp in ("top", "right", "left"): ax.spines[sp].set_visible(False)
     ax.tick_params(axis="y", length=0)
-    ax.set_title("Every arm, at the largest mesh all five completed",
-                 fontsize=11.5, color=INK, fontweight="bold", loc="left", pad=12)
 
-    # ---- panel 2: brae vs OpenFOAM-64c across mesh size --------------------------------------
-    ax2 = fig.add_subplot(gs[0, 1]); ax2.set_facecolor(SURF)
+    _frame(fig, "15k to 24M cells, 100 fixed SIMPLE iterations, on a GH200 against all 64 Grace cores.")
+    handles = [plt.Line2D([], [], marker="o", ls="", ms=9, color=c, markeredgecolor=SURF,
+                          markeredgewidth=1.4, label=n) for n, c in SERIES]
+    handles.insert(1, plt.Line2D([], [], marker="o", ls="", ms=8, color=SURF,
+                                 markeredgecolor=SERIES[0][1], markeredgewidth=2.0, label="brae warm"))
+    fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.012, 0.845), ncol=6,
+               frameon=False, fontsize=9.5, handletextpad=0.45, columnspacing=1.9)
+    fig.text(0.012, 0.028,
+             "Hollow marks are brae warm (iterations 101-200 alone); the bar to the filled mark is its "
+             "start-up.  brae's timer includes that start-up, OpenFOAM's excludes decomposePar.",
+             fontsize=8.2, color=INK3, ha="left")
+    for ext in ("png", "svg"):
+        fig.savefig(f"{out}.{ext}", facecolor=SURF, bbox_inches="tight", pad_inches=0.32)
+    plt.close(fig)
+    print(f"wrote {out}.png / .svg")
+
+
+def fig_scaling(out):
+    fig = plt.figure(figsize=(9.8, 7.2), dpi=200, facecolor=SURF)
+    ax2 = fig.add_axes([0.105, 0.115, 0.855, 0.665]); ax2.set_facecolor(SURF)
     for case, pts in TREND.items():
         hero = case == "aerofoilNACA0012"
         xs = [p[0] for p in pts]; vs = [p[1] for p in pts]
@@ -105,40 +127,32 @@ def main(out="brae_benchmark"):
                  markeredgecolor=SURF, markeredgewidth=1.4, zorder=3 if hero else 2)
         dy = {"squareBend": 7, "squareBendLiq": -1, "squareBendLiqNoNewtonian": -11,
               "angledDuct": 6, "injectorPipe": -7}.get(case, -3)
-        ax2.annotate(f"{vs[-1]:.2f}×", (xs[-1], vs[-1]), textcoords="offset points",
+        ax2.annotate(f"{vs[-1]:.2f}x", (xs[-1], vs[-1]), textcoords="offset points",
                      xytext=(9, dy), fontsize=9 if hero else 8.2,
                      color="#2a78d6" if hero else INK3, fontweight="bold" if hero else "normal")
     ax2.axhline(1.0, color=INK3, lw=1.3, zorder=1)
     ax2.annotate("parity, below this line the CPU wins", (1.35e4, 0.70), fontsize=8.3, color=INK3)
     ax2.annotate("aerofoilNACA0012", (1.0e7, 8.46), textcoords="offset points", xytext=(-6, 14),
-                 fontsize=9, color="#2a78d6", fontweight="bold", ha="right")
+                 fontsize=9.5, color="#2a78d6", fontweight="bold", ha="right")
     ax2.set_xscale("log"); ax2.set_xlim(1.1e4, 7.0e7); ax2.set_ylim(0.6, 9.6)
     ax2.set_xlabel("cells  (log scale)", fontsize=9.5, labelpad=9)
     ax2.set_ylabel("brae speed-up over OpenFOAM on 64 cores", fontsize=9.5, labelpad=8)
     ax2.grid(color=GRID, lw=0.8, zorder=0); ax2.set_axisbelow(True)
-    for s in ("top", "right"): ax2.spines[s].set_visible(False)
-    ax2.set_title("The lead grows with the mesh", fontsize=11.5, color=INK,
-                  fontweight="bold", loc="left", pad=12)
-
-    # ---- titles + legend ---------------------------------------------------------------------
-    fig.text(0.155, 0.945, "brae - rhoSimpleFoam, re-ported to CUDA",
-             fontsize=17, color=INK, fontweight="bold", ha="left")
-    fig.text(0.155, 0.898,
-             "15k to 24M cells, 100 fixed SIMPLE iterations, on a GH200 against all 64 Grace cores.",
-             fontsize=10.3, color=INK2, ha="left")
-    handles = [plt.Line2D([], [], marker="o", ls="", ms=9, color=c, markeredgecolor=SURF,
-                          markeredgewidth=1.4, label=n) for n, c in SERIES]
-    handles.insert(1, plt.Line2D([], [], marker="o", ls="", ms=8, color=SURF,
-                                 markeredgecolor=SERIES[0][1], markeredgewidth=2.0, label="brae warm"))
-    fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.155, 0.868), ncol=6,
-               frameon=False, fontsize=9.5, handletextpad=0.45, columnspacing=1.9)
-    fig.text(0.155, 0.030,
-             "Hollow marks are brae warm (iterations 101-200 alone); the bar to the filled mark is its "
-             "start-up.  brae's timer includes that start-up, OpenFOAM's excludes decomposePar.",
-             fontsize=8.2, color=INK3, ha="left")
+    for sp in ("top", "right"): ax2.spines[sp].set_visible(False)
+    _frame(fig, "The lead grows with the mesh.  Speed-up over OpenFOAM on all 64 Grace cores.")
     for ext in ("png", "svg"):
         fig.savefig(f"{out}.{ext}", facecolor=SURF, bbox_inches="tight", pad_inches=0.32)
-    print(f"wrote {out}.png and {out}.svg")
+    plt.close(fig)
+    print(f"wrote {out}.png / .svg")
+
+
+def main(out="brae_benchmark"):
+    plt.rcParams.update({"font.family": "Liberation Sans", "font.size": 10,
+                         "axes.edgecolor": GRID, "text.color": INK,
+                         "axes.labelcolor": INK2, "xtick.color": INK3, "ytick.color": INK3})
+    fig_arms(f"{out}_arms")
+    fig_scaling(f"{out}_scaling")
+
 
 if __name__ == "__main__":
     main(sys.argv[1] if len(sys.argv) > 1 else "brae_benchmark")
