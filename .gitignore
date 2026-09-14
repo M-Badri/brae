@@ -131,3 +131,7 @@ src/applications/solvers/rhoSimpleFoam/REFUSALS.md
 bench/rhoSimpleFoam/FASTPATH.md
 !validation/slipTurb
 .rho_h_plans.md
+
+# spuma's extrapolated numbers are projections, not measurements, and are kept out of the repo so they
+# can never be mistaken for the measured benchmark walls beside them (asked 2026-09-14).
+bench/rhoSimpleFoam/spuma_extrapolation/

@@ -246,6 +246,23 @@ s = re.sub(r'    p\n    \{.*?\n    \}\n', new, s, count=1, flags=re.S); open(p, 
 PY
         a=$(date +%s.%N); ( cd "$d" && rhoSimpleFoam > log.run 2>&1 ); b=$(date +%s.%N) ;;
       spuma)
+        # SPUMA_TUNED=1 applies the solver set spuma's own published benchmark used: smoothSolver
+        # symGaussSeidel on the transported fields, GAMG on pressure alone. The tutorials ask for GAMG on
+        # EVERY field, and spuma obeys that literally -- five GAMG solves an iteration -- while brae
+        # announces a substitution and runs a multicolour symGaussSeidel for U. Measuring spuma against
+        # brae on the tutorial's own dictionary therefore compares spuma's worst configuration with
+        # brae's chosen one. This arm is spuma at its best, and is reported as its own column.
+        if [ "${SPUMA_TUNED:-0}" = 1 ]; then
+            python3 - "$d/system/fvSolution" <<'PYS'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+s = re.sub(r'"\(U\|e\|k\|epsilon\)"\s*\{[^{}]*\}',
+           '"(U|e|h|k|epsilon|omega)"\n    {\n        solver          smoothSolver;\n'
+           '        smoother        symGaussSeidel;\n        tolerance       1e-08;\n'
+           '        relTol          0.1;\n    }', s)
+open(p, 'w').write(s)
+PYS
+        fi
         a=$(date +%s.%N); ( "$HERE/spuma_run.sh" "$d" > "$d/log.run" 2>&1 ); b=$(date +%s.%N) ;;
     esac
     t=$(python3 -c "import sys; print('%.3f' % (float(sys.argv[2]) - float(sys.argv[1])))" "$a" "$b")

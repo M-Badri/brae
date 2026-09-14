@@ -10,6 +10,13 @@
 set -u
 CASE="${1:?usage: spuma_run.sh <caseDir>}"
 SPUMA_DIR="${SPUMA_DIR:-$HOME/spuma}"
+# Pool size from the mesh. spuma_sweep.sh on the GB10 used 8 GB at ~4.9M cells and 56 GB at ~35.6M,
+# i.e. about 1.6 kB/cell; take twice that for headroom, floor 4 GB. fixedSizeMemoryPool must be big
+# enough for the case or the run dies inside it.
+if [ -z "${SPUMA_POOLGB:-}" ] && [ -f "$1/constant/polyMesh/owner" ]; then
+    NC=$(grep -aoE 'nCells:?[[:space:]]*[0-9]+' "$1/constant/polyMesh/owner" | grep -oE '[0-9]+' | head -1)
+    SPUMA_POOLGB=$(python3 -c "import sys; n=int(sys.argv[1]); print(max(4, int(n*3400/1073741824)+2))" "${NC:-0}")
+fi
 SPUMA_POOLGB="${SPUMA_POOLGB:-8}"
 SPUMA_SDK="${SPUMA_SDK:-/opt/nvidia/hpc_sdk/Linux_aarch64/26.5}"
 export PATH="$SPUMA_SDK/compilers/bin:$PATH"
