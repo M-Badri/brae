@@ -116,12 +116,11 @@ def fig_arms(out):
                           markeredgewidth=1.4, label=n) for n, c in SERIES]
     handles.insert(1, plt.Line2D([], [], marker="o", ls="", ms=8, color=SURF,
                                  markeredgecolor=SERIES[0][1], markeredgewidth=2.0, label="brae warm"))
-    fig.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.012, 0.845), ncol=6,
+    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.845), ncol=6,
                frameon=False, fontsize=9.5, handletextpad=0.45, columnspacing=1.9)
-    fig.text(0.012, 0.028,
-             "Hollow marks are brae warm (iterations 101-200 alone); the bar to the filled mark is its "
-             "start-up.  brae's timer includes that start-up, OpenFOAM's excludes decomposePar.",
-             fontsize=8.2, color=INK3, ha="left")
+    fig.text(0.5, 0.028,
+             "brae's timer includes that start-up, OpenFOAM's excludes decomposePar.",
+             fontsize=8.2, color=INK3, ha="center")
     for ext in ("png", "svg"):
         fig.savefig(f"{out}.{ext}", facecolor=SURF, bbox_inches="tight", pad_inches=0.32)
     plt.close(fig)
