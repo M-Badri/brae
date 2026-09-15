@@ -139,12 +139,14 @@ Brae implements OpenFOAM's solvers one at a time, each fully device-resident and
 
 - [`simpleFoam`](docs/solvers/simplefoam.md) — steady incompressible
 - [`pimpleFoam`](docs/solvers/pimplefoam.md) — transient incompressible — **brae 4.5× faster than SPUMA**
+- `rhoSimpleFoam` — steady compressible, subsonic and transonic — all six of its OpenFOAM tutorials run on
+  both arms and are held against real OpenFOAM iteration by iteration
 
 You always type `brae`. It reads the `application` entry your case already has in `controlDict` and runs the
 matching solver, so a transient case needs no different command. A case asking for a solver brae does not have
 stops at start-up, named, rather than being solved with the wrong one.
 
-Coming soon: compressible solver.
+Coming soon: `interFoam` (two-phase VoF).
 
 ---
 
