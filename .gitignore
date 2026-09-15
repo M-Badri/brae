@@ -67,6 +67,28 @@ validation/*
 !validation/rhoKE2/
 !validation/rhoLimKE/
 !validation/rhoSnGrad/
+# CI-only fixtures, added 2026-09-15: four tests were red on main purely because validation/* swallowed
+# the cases they read -- frozen_bc_refusals and les_wallfunction_refusals (backwardFacingStep2D),
+# nonorth_vs_openfoam (shearedChannel), determinism_komega (pitzDailyKOmega). The tests pass locally
+# because the directories exist on the dev box; CI gets only what is tracked.
+!validation/shearedChannel/
+!validation/backwardFacingStep2D/
+# ...but not its GENERATED fields. C/Cx/Cy/Cz/V/y are postProcess output (cell centres, volumes, wall
+# distance), 3.25 MB of the directory's 3.3 MB `0/`, and both codes compute them from the mesh. The
+# inputs the tests read -- U, p, k, epsilon, omega, nut, nuTilda -- are 4 KB each.
+validation/backwardFacingStep2D/0/C
+validation/backwardFacingStep2D/0/Cx
+validation/backwardFacingStep2D/0/Cy
+validation/backwardFacingStep2D/0/Cz
+validation/backwardFacingStep2D/0/V
+validation/backwardFacingStep2D/0/y
+# pitzDailyKOmega is 38 MB on disk, 21 time directories of a local run. determinism_gate.sh deletes
+# every directory except 0/constant/system immediately after copying, so only those are tracked: 2.6 MB.
+!validation/pitzDailyKOmega/
+validation/pitzDailyKOmega/*
+!validation/pitzDailyKOmega/0/
+!validation/pitzDailyKOmega/constant/
+!validation/pitzDailyKOmega/system/
 !validation/rhoRX/
 !validation/rhoPM/
 !validation/energyBox/
