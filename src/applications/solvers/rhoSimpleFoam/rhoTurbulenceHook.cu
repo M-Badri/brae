@@ -159,6 +159,14 @@ void correctTurbulence(
     kin.linearUpwind          = opt.linearUpwind;
     kin.luGradK               = opt.luGradK;
     kin.correctedLaplacian = opt.correctedLaplacian;
+    // The cap the case asked for, which this hook used to drop on the floor. The driver parses
+    // `laplacianSchemes { default Gauss linear limited 0.33; }` and stores it at opt.co.snGradLimitCoeff
+    // (rhoSimpleFoamDriver.cu:322), but the device closure reads KEpsilonInput::snGradLimitCoeff
+    // (kEpsilon.cu:680), which nothing assigned -- so it kept its 0.0 default, and 0 means UNCAPPED here.
+    // Momentum, energy and pressure ran the capped correction while k and epsilon/omega ran the uncapped
+    // one, under the case's own scheme name and without a notice. The host arm never had the gap
+    // (rhoSimpleFoam_cpp.cu:1399). The SST branch below copies this member, so it is fixed by the same line.
+    kin.snGradLimitCoeff   = opt.co.snGradLimitCoeff;
     kin.relaxEquationK   = opt.relaxEquationK;   kin.relaxK   = opt.relaxK;
     kin.relaxEquationEps = opt.relaxEquationEps; kin.relaxEps = opt.relaxEps;
     kin.tol = opt.tol; kin.relTol = opt.relTol; kin.maxIter = opt.maxIter; kin.minIter = opt.minIter;
