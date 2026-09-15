@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A DIVERGED RUN MUST REFUSE, not report a wall time for a run that computed nothing.
 #
-# T-5 (bench/results/rhoSimpleFoam_tutorials_gb10.md, 2026-09-13). squareBend run subsonic -- its own
+# T-5 (bench/results/rhoSimpleFoam/rhoSimpleFoam_tutorials_gb10.md, 2026-09-13). squareBend run subsonic -- its own
 # `transonic yes` flipped to no with the inlet at 0.1 kg/s -- diverges. OpenFOAM aborts on it: the
 # thermo inversion throws on the temperature within about twenty iterations. brae's CUDA arm ran all
 # 100 iterations printing `e nan   p nan   k nan`, exited 0, and handed back a wall time. That is the

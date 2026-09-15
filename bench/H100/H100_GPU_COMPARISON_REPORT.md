@@ -6,7 +6,7 @@ with identical schemes, solver tolerances, and convergence criteria. Every numbe
 Two figures are labelled as *derived* (effective HBM bandwidth in §5, cost in §6); nothing else is estimated. Blank
 cells mark a runner that failed or was not measured, with the reason stated.
 
-This is the H100 counterpart to the earlier GB10 study (`bench/results/BENCHMARK_TOTALWALL.md`). GB10 has no HBM (its
+This is the H100 counterpart to the earlier GB10 study (`bench/results/simpleFoam/BENCHMARK_TOTALWALL.md`). GB10 has no HBM (its
 GPU shares the CPU's LPDDR5X), so there brae only reached parity with a CPU node. This report tests the follow-up
 question, whether the same code delivers an order-of-magnitude speedup on a GPU with real HBM.
 

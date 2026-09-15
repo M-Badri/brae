@@ -8,7 +8,7 @@
 # fixture at 20 iterations: DILU 202 against 668 BiCGStab iterations on the first p solve, and 474
 # against 68 ms per iteration on the p phase (tolerance 1e-12 / relTol 0, so both converge fully and the
 # residual trajectories agree to the printed digits); at 896k cells on the squareBend tutorial 567
-# against 315 ms (bench/results/rhoSimpleFoam_squareBend_gb10.md). BRAE_DILU_P=1 opts in.
+# against 315 ms (bench/results/rhoSimpleFoam/rhoSimpleFoam_squareBend_gb10.md). BRAE_DILU_P=1 opts in.
 #   ARM 1   the notices are truthful: the default run announces "case asks 'DILU', brae preconditions
 #           with diagonal"; the BRAE_DILU_P=1 run announces NOTHING on solvers/p (nothing substituted).
 #   ARM 2   it is a preconditioner, not a different equation: both runs' p initial residuals track

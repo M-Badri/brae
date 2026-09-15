@@ -161,7 +161,7 @@ brae is slower at EVERY size. The ratio bottoms at 1.25x near 112k and opens bot
 fixed per-iteration cost (kernel launches, the pressure graph, host syncs) does not shrink with the mesh
 while OpenFOAM's 20 cores still have work to share; above it, the diagonal-BiCGStab's iteration count on
 the transonic p grows with the mesh where GAMG's does not (46 -> 7 iterations at 896k). The incompressible
-solver's crossover (bench/results/crossover.csv, motorbike, ~12M cells) does not carry over: that path runs
+solver's crossover (bench/results/simpleFoam/crossover.csv, motorbike, ~12M cells) does not carry over: that path runs
 AMG-PCG on a symmetric p. So the compressible crossover is not a mesh size to wait for; it appears only
 when item 77b (an AMG-preconditioned BiCGStab for the asymmetric p) is built, and the subsonic sweep below
 says what the symmetric path alone would give.

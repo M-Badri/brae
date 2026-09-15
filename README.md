@@ -31,7 +31,7 @@ On one **H100**, at matched accuracy (under 1% on the fields):
 - **3.9x faster** than the [SPUMA](https://gitlab-hpc.cineca.it/exafoam/spuma) OpenFOAM-GPU port
 - **2.5x faster** than a 24-core CPU node
 
-![Solver runtime, brae vs OpenFOAM-CPU, AMGX, PETSc, and SPUMA on a single NVIDIA GB10, log scale, lower is better](bench/results/solver_runtime_comparison.png)
+![Solver runtime, brae vs OpenFOAM-CPU, AMGX, PETSc, and SPUMA on a single NVIDIA GB10, log scale, lower is better](bench/results/simpleFoam/solver_runtime_comparison.png)
 
 *The chart is GB10, the conservative baseline: with no HBM its GPU shares the CPU's memory, so there it only reaches
 about 5x over the offloads and parity with the CPU. On the H100's HBM the same code widens to 26-30x. Not
@@ -47,13 +47,13 @@ produce a visually identical surface-pressure field and agree to ~1.6% on drag.
 
 | brae (Blackwell GPU) | OpenFOAM (Grace CPU) |
 |:---:|:---:|
-| ![motorBike surface pressure, brae on a Blackwell GPU](bench/results/motorbike_p_brae.png) | ![motorBike surface pressure, OpenFOAM on Grace CPU cores](bench/results/motorbike_p_of.png) |
+| ![motorBike surface pressure, brae on a Blackwell GPU](bench/results/simpleFoam/motorbike_p_brae.png) | ![motorBike surface pressure, OpenFOAM on Grace CPU cores](bench/results/simpleFoam/motorbike_p_of.png) |
 | **OpenFOAM + AMGX (GPU)** | **OpenFOAM + PETSc (GPU)** |
-| ![motorBike surface pressure, OpenFOAM with the AMGX GPU solver](bench/results/motorbike_p_amgx.png) | ![motorBike surface pressure, OpenFOAM with the PETSc GPU solver](bench/results/motorbike_p_petsc.png) |
+| ![motorBike surface pressure, OpenFOAM with the AMGX GPU solver](bench/results/simpleFoam/motorbike_p_amgx.png) | ![motorBike surface pressure, OpenFOAM with the PETSc GPU solver](bench/results/simpleFoam/motorbike_p_petsc.png) |
 | **SPUMA (OpenFOAM-GPU port)** |  |
-| ![motorBike surface pressure, the SPUMA OpenFOAM-GPU port](bench/results/motorbike_p_spuma.png) |  |
+| ![motorBike surface pressure, the SPUMA OpenFOAM-GPU port](bench/results/simpleFoam/motorbike_p_spuma.png) |  |
 
-See the [full five-way comparison](bench/results/motorbike_comparison.md) for the drag and lift numbers.
+See the [full five-way comparison](bench/results/simpleFoam/motorbike_comparison.md) for the drag and lift numbers.
 
 ---
 
