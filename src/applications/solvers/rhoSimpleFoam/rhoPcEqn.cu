@@ -314,13 +314,20 @@ void consistentPressurePredictor(
         else                 deviceGaussGrad(dm, p, pb, gx, gy, gz);
         if (in.gradPLimitK > 0.0) deviceCellLimitGrad(dm, p, pb, gx, gy, gz, in.gradPLimitK);
 
+        // correctedFvcSnGrad / fvcSnGradLimitCoeff, NOT the laplacian's pair: this is fvc::snGrad(p)
+        // (pcEqn.H:64) and its scheme is snGradSchemes' (fvcSnGrad.C:56-64 -> schemesLookup.C:249).
+        // Both arms read in.correctedLaplacian here until 2026-09-15; validation/rhoSnGrad is the
+        // fixture where the two blocks disagree and the difference is visible.
         DeviceBuffer<scalar> ld, lu, ll;
-        deviceLaplacianCoeffs(dm, gammaf, ld, lu, ll, in.correctedLaplacian);
+        deviceLaplacianCoeffs(dm, gammaf, ld, lu, ll, in.correctedFvcSnGrad);
         deviceMatrixFluxInternal(deviceLduView(dm, ld, lu, ll), p, corrInt);
-        if (in.correctedLaplacian)
+        if (in.correctedFvcSnGrad)
         {
             DeviceBuffer<scalar> ffc;
-            deviceLaplacianCorrFlux(dm, gammaf, gx, gy, gz, ffc);
+            if (in.fvcSnGradLimitCoeff > 0.0)
+                deviceLaplacianCorrFluxLimited(dm, gammaf, p, gx, gy, gz, in.fvcSnGradLimitCoeff, ffc);
+            else
+                deviceLaplacianCorrFlux(dm, gammaf, gx, gy, gz, ffc);
             deviceAxpy(1.0, ffc, corrInt);
         }
         gammaBnd.resize(dm.nBndFaces);

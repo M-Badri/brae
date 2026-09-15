@@ -187,8 +187,25 @@ struct DeviceSimpleControls
     static constexpr scalar lustCentralFrac = 0.75;
     static constexpr scalar lustUpwindFrac  = 0.25;
     bool   lust = false;         // div(phi,U) "LUST": deferred correction = 0.75*linear + 0.25*linearUpwind (OF LUST.H).
-    bool   nonOrth = false;      // laplacian "corrected"|"limited": nonOrthDeltaCoeffs implicit + explicit corrVec.grad correction. Set from fvSchemes.
-    scalar nonOrthLimit = 1.0;   // snGrad "limited <psi>" coeff (OF fv::limitedSnGrad); 1.0 = "corrected" (unlimited). Set from fvSchemes.
+    // THE LAPLACIAN'S OWN snGrad SCHEME, from laplacianSchemes ONLY. An `fvm::laplacian` entry carries
+    // its own snGrad scheme, built from that entry's Istream (laplacianScheme.H:121-141), so
+    // `Gauss linear corrected` governs every laplacian in the solver and nothing else.
+    bool   nonOrth = false;      // laplacianSchemes "corrected"|"limited": nonOrthDeltaCoeffs implicit + explicit corrVec.grad correction.
+    scalar nonOrthLimit = 1.0;   // that entry's "limited <psi>" coeff (OF fv::limitedSnGrad); 1.0 = "corrected" (unlimited).
+    // fvc::snGrad's scheme, from snGradSchemes ONLY -- A DIFFERENT OPERATOR WITH A DIFFERENT ENTRY.
+    // fvcSnGrad.C:56-64 looks the field up in snGradSchemes (schemesLookup.C:249-253); the laplacian
+    // never consults that block and snGrad never consults the laplacian's. The block is OPTIONAL and
+    // its own default is `corrected` (schemesLookup.C:82, populate(dict, "corrected")) -- which is why
+    // snGradCorrected starts TRUE while nonOrth starts false: an absent snGradSchemes means corrected,
+    // an absent laplacianSchemes is a FatalError in OpenFOAM (schemesLookup.C:83, mandatory).
+    //
+    // rhoSimpleFoam and simpleFoam reach fvc::snGrad in exactly one place, the SIMPLEC flux correction
+    // (pcEqn.H:27,64 and pEqn.H:14): interpolate(rho*(rAtU - rAU))*fvc::snGrad(p)*magSf. Without
+    // `consistent yes` these two are read by nothing, which is why the collapse survived: every rho
+    // fixture with the blocks disagreeing (rhoCtl, rhoPM) is a perfect box, where corrected ==
+    // orthogonal. validation/rhoSnGrad is the fixture that can see it.
+    bool   snGradCorrected = true;   // snGradSchemes "corrected"|"limited"; OF's default when the block is absent
+    scalar snGradLimit     = 1.0;    // snGradSchemes "limited <psi>" coeff; 1.0 = uncapped
     int    nNonOrth = 0;         // SIMPLE.nNonOrthogonalCorrectors: extra pressure-correction passes (pEqn re-solved nNonOrth+1 times). Set from fvSolution.
     scalar gradULimitK = 0.0;    // grad(U) "cellLimited Gauss linear <k>" coeff (OF cellLimitedGrad<minmod>); 0 = unlimited. Set from fvSchemes.
     bool   limitedK = false, limitedEps = false;  // div(phi,k|epsilon) "limitedLinear": implicit limited weight. Set from fvSchemes.

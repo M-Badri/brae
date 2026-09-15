@@ -523,7 +523,8 @@ SurfaceScalarField snGrad(
     const std::vector<FvPatch>&   patches,
     bool                          corrected,
     bool                          leastSquares,
-    scalar                        cellLimitK)
+    scalar                        cellLimitK,
+    scalar                        limitCoeff)
 {
     const label nIf = m.nInternalFaces();
     const std::vector<label>& own = m.owner();
@@ -545,6 +546,10 @@ SurfaceScalarField snGrad(
         if (cellLimitK > 0.0) cpu::cellLimitGrad(gradVf, vf, cellLimitK, m, g, patches);
         const std::vector<vector>& corrVecs = g.nonOrthCorrectionVectors();
         const std::vector<scalar>& w        = g.weights();
+        // limitedSnGrad's per-face cap, against the ORTHOGONAL part of this same snGrad -- which is
+        // sf.internal[f] as it stands here, before the correction is added. Same arithmetic as
+        // fvm::laplacianCorrFlux's, on the same quantity; psi >= 1 or 0 means uncapped.
+        const bool limited = (limitCoeff > 0.0 && limitCoeff < 1.0);
         for (label f = 0; f < nIf; ++f)
         {
             const vector& go = gradVf[own[f]];
@@ -552,7 +557,12 @@ SurfaceScalarField snGrad(
             const vector  gf { w[f] * go.x + (1.0 - w[f]) * gn.x,
                                w[f] * go.y + (1.0 - w[f]) * gn.y,
                                w[f] * go.z + (1.0 - w[f]) * gn.z };
-            sf.internal[f] += corrVecs[f].x * gf.x + corrVecs[f].y * gf.y + corrVecs[f].z * gf.z;
+            scalar corr = corrVecs[f].x * gf.x + corrVecs[f].y * gf.y + corrVecs[f].z * gf.z;
+            if (limited)
+                corr *= std::fmin(limitCoeff * std::fabs(sf.internal[f])
+                                      / ((1.0 - limitCoeff) * std::fabs(corr) + 1e-15),
+                                  1.0);
+            sf.internal[f] += corr;
         }
     }
 

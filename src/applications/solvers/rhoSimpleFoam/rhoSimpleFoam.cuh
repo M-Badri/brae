@@ -181,6 +181,11 @@ struct RhoStepInput
     bool   gradPLeastSq = false;
     scalar gradPLimitK  = 0.0;   // ...and its cellLimited coefficient, on the same five consumers (0 = unlimited)
     bool   correctedLaplacian = false;
+    // snGradSchemes, read only by rhoPcEqn's SIMPLEC correction (fvc::snGrad(p), pcEqn.H:64). A
+    // different block from the laplacian's and defaulting to `corrected` when absent, as OpenFOAM does
+    // (schemesLookup.C:82). See solver_controls.cuh.
+    bool   correctedFvcSnGrad  = true;
+    scalar fvcSnGradLimitCoeff = 0.0;
     scalar snGradLimitCoeff   = 0.0;
     bool   isE = true;                    // he == "e" selects Ekp, "h" selects K
 

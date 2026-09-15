@@ -1,0 +1,40 @@
+FoamFile { version 2.0; format ascii; class dictionary; object fvSchemes; }
+
+ddtSchemes      { default steadyState; }
+gradSchemes     { default Gauss linear; }
+
+divSchemes
+{
+    default         none;
+    div(phi,U)      bounded Gauss upwind;
+    div(phi,h)      bounded Gauss upwind;
+    div(phi,e)      bounded Gauss upwind;
+    div(phi,K)      bounded Gauss upwind;
+    div(phi,Ekp)    bounded Gauss upwind;
+    div(((rho*nuEff)*dev2(T(grad(U))))) Gauss linear;
+}
+
+// THE POINT OF THIS FIXTURE: THE TWO BLOCKS DISAGREE, AND OPENFOAM HONOURS BOTH.
+//
+// A laplacian entry carries its OWN snGrad scheme (laplacianScheme.H:121-141 builds tsnGradScheme_
+// from the entry's Istream), so `orthogonal` here governs every fvm::laplacian -- momentum, energy,
+// pressure, k and epsilon. It does NOT govern fvc::snGrad, which is looked up in snGradSchemes
+// (fvcSnGrad.C:56-64 -> schemesLookup.C:249-253). The two are separate operators with separate
+// entries, and `snGradSchemes` is OPTIONAL with its own default of `corrected`
+// (schemesLookup.C:82, populate(dict, "corrected")) -- so even DELETING this block would not make
+// fvc::snGrad follow the laplacian.
+//
+// rhoSimpleFoam reaches fvc::snGrad exactly once, in pcEqn.H:64 --
+//     phiHbyA += fvc::interpolate(rho*(rAtU - rAU))*fvc::snGrad(p)*mesh.magSf()
+// -- which is why fvSolution has `consistent yes`. Without SIMPLEC there is no fvc::snGrad in this
+// solver at all and no version of this fixture could discriminate.
+//
+// The mesh is rhoLimKE's, tilted to 16.3 degrees maximum non-orthogonality: on an ORTHOGONAL mesh
+// the correction vectors are zero and corrected == orthogonal, which is why every other rho fixture
+// that has the two blocks disagreeing (rhoCtl, rhoPM: corrected laplacian, orthogonal snGrad, both
+// SIMPLEC) is a perfect box and could host no version of this test.
+laplacianSchemes { default Gauss linear orthogonal; }
+snGradSchemes    { default corrected; }
+
+interpolationSchemes { default linear; }
+wallDist        { method meshWave; }

@@ -132,6 +132,10 @@ struct RhoPressureInput
 
     bool   correctedLaplacian = false;   // BOTH halves, as everywhere else in this port
     scalar snGradLimitCoeff   = 0.0;
+    // snGradSchemes, for rhoPcEqn's fvc::snGrad(p) ALONE (pcEqn.H:64) -- pEqn's laplacian takes the
+    // pair above. Defaults to `corrected` because OpenFOAM's absent-block default is (schemesLookup.C:82).
+    bool   correctedFvcSnGrad  = true;
+    scalar fvcSnGradLimitCoeff = 0.0;
     // grad(p) resolving to leastSquares: the non-orthogonal correction's gradient here and in pcEqn,
     // and SIMPLEC's HbyA correction (pcEqn.H:30,65). See RhoStepInput::gradPLeastSq.
     bool   gradPLeastSq       = false;

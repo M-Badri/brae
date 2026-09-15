@@ -1354,7 +1354,9 @@ Residuals rhoSimpleStep(
     pin.relaxP = in.relaxPEqn;
     pin.relaxPSpecified = in.relaxPEqnSpecified;
     pin.pRefCell = in.pRefCell;      pin.pRefValue = in.pRefValue;
-    pin.correctedLaplacian = in.correctedLaplacian;
+    pin.correctedLaplacian  = in.correctedLaplacian;
+    pin.correctedFvcSnGrad  = in.correctedFvcSnGrad;    // snGradSchemes, for the SIMPLEC fvc::snGrad(p)
+    pin.fvcSnGradLimitCoeff = in.fvcSnGradLimitCoeff;
     pin.snGradLimitCoeff = in.snGradLimitCoeff;
     pin.gradPLeastSq     = in.gradPLeastSq;
     pin.gradPLimitK      = in.gradPLimitK;

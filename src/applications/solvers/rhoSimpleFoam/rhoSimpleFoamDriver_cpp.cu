@@ -209,6 +209,17 @@ StepInput buildStepInput(
                 "one of them under the case's name.");
         in.correctedLaplacian = sctl.nonOrth;
         in.snGradLimitCoeff   = (sctl.nonOrth && sctl.nonOrthLimit < 1.0) ? sctl.nonOrthLimit : 0.0;
+        // snGradSchemes, the OTHER block, for fvc::snGrad alone. Same three regimes and the same
+        // refusal: `limited 0` is nonOrthDeltaCoeffs with the explicit correction zeroed, which
+        // fvc::snGrad's single `corrected` flag cannot express either.
+        if (sctl.snGradCorrected && sctl.snGradLimit <= 0.0)
+            throw std::runtime_error(
+                "rhoSimpleFoam buildStepInput: snGradSchemes asks for `limited 0`. As for the laplacian "
+                "above, OpenFOAM's limitedSnGrad then uses nonOrthDeltaCoeffs WITHOUT the explicit "
+                "correction, which is neither `orthogonal` nor `corrected`; fvc::snGrad here carries one "
+                "flag for both halves. Refusing rather than running a neighbour under the case's name.");
+        in.correctedFvcSnGrad  = sctl.snGradCorrected;
+        in.fvcSnGradLimitCoeff = (sctl.snGradCorrected && sctl.snGradLimit < 1.0) ? sctl.snGradLimit : 0.0;
         in.gradULimitK        = sctl.gradULimitK;
         in.gradKLimitK        = sctl.gradKLimitK;
         // grad(U)'s and grad(p)'s BASE scheme, each field's own gradSchemes entry, named-then-default:

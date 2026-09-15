@@ -702,6 +702,10 @@ add_test(NAME tvm_mapping COMMAND test_tvm_mapping)
 add_test(NAME manifest_rhosimplefoam_not_drifted
          COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/of_manifest.py rhoSimpleFoam
                  --check ${CMAKE_CURRENT_SOURCE_DIR}/manifest/rhoSimpleFoam.yaml)
+# ofscan is a sibling checkout, not a build dependency (see tools/of_manifest.py's db()). A box that
+# lacks it cannot ask the drift question and must SKIP, not fail -- the GH200 reported a red here for
+# exactly that reason on 2026-09-15.
+set_tests_properties(manifest_rhosimplefoam_not_drifted PROPERTIES SKIP_RETURN_CODE 77)
 
 # The simpleFoam twin existed only as a tool flag, and its manifest drifted for weeks: sixteen whole
 # entries and four long validation/note blocks were hand-added to the YAML while the tool's curated
@@ -710,6 +714,7 @@ add_test(NAME manifest_rhosimplefoam_not_drifted
 add_test(NAME manifest_simplefoam_not_drifted
          COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tools/of_manifest.py simpleFoam
                  --check ${CMAKE_CURRENT_SOURCE_DIR}/manifest/simpleFoam.yaml)
+set_tests_properties(manifest_simplefoam_not_drifted PROPERTIES SKIP_RETURN_CODE 77)
 
 add_executable(test_rho_kepsilon_cuda tests/test_rho_kepsilon_cuda.cu)
 target_include_directories(test_rho_kepsilon_cuda PRIVATE ${BRAE_HEADER_DIRS})
@@ -2173,6 +2178,16 @@ add_test(NAME rho_turb_laplacian_limiter_vs_openfoam
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_turb_laplacian_limiter_vs_openfoam.sh)
 set_tests_properties(rho_turb_laplacian_limiter_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
 
+# snGradSchemes and laplacianSchemes are two blocks for two operators; brae collapsed them into one
+# pair of flags. Both arms, because the SIMPLEC fvc::snGrad(p) was misrouted in each independently.
+add_test(NAME rho_sngrad_scheme_vs_openfoam
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_sngrad_scheme_vs_openfoam.sh)
+set_tests_properties(rho_sngrad_scheme_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+add_test(NAME rho_sngrad_scheme_cpp_vs_openfoam
+         COMMAND ${CMAKE_COMMAND} -E env ARM=cpu
+                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_sngrad_scheme_vs_openfoam.sh)
+set_tests_properties(rho_sngrad_scheme_cpp_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
 add_test(NAME tpm_vs_openfoam
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/validation/tpm_vs_openfoam.sh)
 set_tests_properties(tpm_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77 LABELS slow)
@@ -2435,6 +2450,10 @@ target_include_directories(test_energy_bc PRIVATE ${BRAE_HEADER_DIRS})
 target_link_libraries(test_energy_bc PRIVATE brae_core)
 add_test(NAME energy_bc_vs_openfoam
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/energy_bc_vs_openfoam.sh)
+# The script already exits 77 when tools/dumpEnergyBC is not wmade; without this ctest called that a
+# FAILURE, which is what the GH200 reported on 2026-09-15. Every other *_vs_openfoam gate that can
+# skip carries this property; this one was missed.
+set_tests_properties(energy_bc_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77)
 
 # `properties liquid` END TO END on the host mirror arm (stage H3.4): the NSRDS property correlations,
 # OpenFOAM's own he -> T inversion seeded from the cell's previous T, and limitTemperature's he bounds

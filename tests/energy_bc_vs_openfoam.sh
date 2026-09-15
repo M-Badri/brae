@@ -108,8 +108,12 @@ done
 # remaining bound would still be green -- a gate measuring nothing and reporting a pass.
 echo "== coverage =="
 for K in A B C; do
+    # awk, not `paste -sd+ - | bc`: bc is not installed everywhere and is not required by POSIX. On the
+    # GH200 it is absent, `bc` printed "command not found", N came back EMPTY, and this coverage check
+    # reported "control A exercised on NO faces" -- a gate whose own assertions had all passed failing
+    # on a missing desk calculator. Measured 2026-09-15. awk is in every base image this runs on.
     N=$(cat "$W"/*.out 2>/dev/null | sed -n 's/.*controls exercised: //p' \
-        | tr ' ' '\n' | sed -n "s/^$K=//p" | paste -sd+ - | bc)
+        | tr ' ' '\n' | sed -n "s/^$K=//p" | awk '{s += $1} END {print s + 0}')
     N=${N:-0}
     if [ "$N" -gt 0 ]; then
         echo "     control $K exercised on $N faces                    ok"

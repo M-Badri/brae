@@ -111,6 +111,9 @@ SurfaceScalarField rhoFlux(const std::vector<scalar>& rho,
 //
 // provenance: snGradScheme.C (snGrad(vf, deltaCoeffs)) and correctedSnGrad.C (the correction).
 //
+// `corrected` and `limitCoeff` come from snGradSchemes (fvcSnGrad.C:56-64 -> schemesLookup.C:249),
+// NOT from the laplacian's entry. The two were one flag in brae until 2026-09-15.
+//
 //   internal:  dc[f]*(vf[nei] - vf[own]),  dc = nonOrthDeltaCoeffs when `corrected`, else deltaCoeffs
 //              plus, when corrected, corrVecs[f] & interpolate(grad(vf))[f]
 //   boundary:  pvf.snGrad() on UNCOUPLED patches -- the patch's OWN deltaCoeffs, NOT the corrected ones
@@ -133,7 +136,11 @@ SurfaceScalarField snGrad(
     // against OpenFOAM at iteration 2: U 1.98e-09 with Gauss here, and the CUDA arm -- which takes the
     // case's gradient -- 5.7e-12 (tests/rho_gradp_lsq_simplec_vs_openfoam.sh).
     bool                          leastSquares = false,
-    scalar                        cellLimitK   = 0.0);   // ...and its cellLimited coefficient, 0 = unlimited
+    scalar                        cellLimitK   = 0.0,    // ...and its cellLimited coefficient, 0 = unlimited
+    // `limited <psi>` in snGradSchemes (OF fv::limitedSnGrad): the same per-face cap fvm::laplacian's
+    // own snGrad takes, min(psi*|orth|/((1 - psi)*|corr| + SMALL), 1). 0 = uncapped, as elsewhere.
+    // The block's coefficient, NOT laplacianSchemes' -- these are two entries for two operators.
+    scalar                        limitCoeff   = 0.0);
 
 // interpolate a volScalarField (cell array) to faces: linear internal; boundary = cell value
 // (zeroGradient/extrapolated, as for rAU = 1/A()).

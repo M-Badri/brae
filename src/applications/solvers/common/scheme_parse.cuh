@@ -687,12 +687,19 @@ inline void parseFvSchemesControls(const std::string& caseDir, DeviceSimpleContr
                 const auto d = gradLimitByName.find("default");
                 return d != gradLimitByName.end() ? d->second : 0.0;
             };
+            bool sawSnGradBlock = false;
             for (const Stmt& st : stmts)
             {
                 const std::string& ln = st.text;
                 const bool inDiv    = (st.block == "divSchemes");
                 const bool inGrad   = (st.block == "gradSchemes");
-                const bool inLap    = (st.block == "laplacianSchemes" || st.block == "snGradSchemes");
+                // SEPARATE OPERATORS, SEPARATE BLOCKS. These were one `inLap` until 2026-09-15, so a
+                // `corrected` in EITHER wrote ctl.nonOrth and nothing could write it back: a case with
+                // `laplacianSchemes { default Gauss linear orthogonal; }` and `snGradSchemes { default
+                // corrected; }` ran EVERY fvm::laplacian corrected, under the orthogonal name the file
+                // asked for. See the two flag pairs in solver_controls.cuh for what each governs.
+                const bool inLap    = (st.block == "laplacianSchemes");
+                const bool inSnGrad = (st.block == "snGradSchemes");
                 const bool inInterp = (st.block == "interpolationSchemes");
                 (void)inInterp;
                 if (inDiv && ln.find("div(phi,U)") != std::string::npos)
@@ -875,20 +882,32 @@ inline void parseFvSchemesControls(const std::string& caseDir, DeviceSimpleContr
                     if (ln.find("linearUpwind") != std::string::npos) ctl.luK = true;
                     if (hasWord(ln, "bounded")) ctl.boundedK = true;   // SA: nuTilda uses the k slot
                 }
-                if (inLap)
+                // One reader for both blocks, because the scheme VOCABULARY is shared -- a laplacian
+                // entry builds its snGrad through the same snGradScheme<Type>::New the snGradSchemes
+                // block uses (laplacianScheme.H:134-138). What differs is only which pair of flags the
+                // answer lands in, which is exactly what was collapsed.
+                auto readSnGrad = [&](const std::string& ln, bool& corrected, scalar& limit)
                 {
-                    if (hasWord(ln, "corrected")) ctl.nonOrth = true;     // unlimited non-orth correction (psi = 1)
+                    if (hasWord(ln, "corrected")) corrected = true;       // unlimited non-orth correction (psi = 1)
                     // OF fv::limitedSnGrad "limited [<correctedScheme>] <psi>" (psi in [0,1]): non-orth correction
                     // capped per-face. hasWord avoids matching "unlimited" and "limitedLinear" (a div scheme); the coeff
                     // is the next numeric token after "limited" (skip an optional scheme word like "corrected").
                     if (hasWord(ln, "limited"))
                     {
-                        ctl.nonOrth = true;
+                        corrected = true;
                         scalar psi = 1.0;
-                        const char* s = ln.c_str() + ln.find("limited") + 7;
-                        while (*s && !(std::isdigit((unsigned char)*s) || *s == '.')) ++s;   // skip to the coefficient
-                        if (std::sscanf(s, "%lf", &psi) == 1) ctl.nonOrthLimit = psi;
+                        const char* c = ln.c_str() + ln.find("limited") + 7;
+                        while (*c && !(std::isdigit((unsigned char)*c) || *c == '.')) ++c;   // skip to the coefficient
+                        if (std::sscanf(c, "%lf", &psi) == 1) limit = psi;
                     }
+                };
+                if (inLap)    readSnGrad(ln, ctl.nonOrth, ctl.nonOrthLimit);
+                if (inSnGrad)
+                {
+                    // The block IS present, so its default is the file's, not OpenFOAM's `corrected`
+                    // fallback. Cleared first because the fallback is the initial value of the flag.
+                    if (!sawSnGradBlock) { sawSnGradBlock = true; ctl.snGradCorrected = false; ctl.snGradLimit = 1.0; }
+                    readSnGrad(ln, ctl.snGradCorrected, ctl.snGradLimit);
                 }
             }
             // No explicit div(phi,K|Ekp): OF would fall through to the divSchemes `default`. brae keeps its

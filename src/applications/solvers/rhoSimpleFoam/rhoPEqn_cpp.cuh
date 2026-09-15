@@ -89,6 +89,10 @@ struct PressureInput
     label  pRefCell             = -1;      // pressureControl.refCell(); -1 => no reference needed
     scalar pRefValue            = 0.0;
     bool   correctedLaplacian   = false;
+    // snGradSchemes, for rhoPcEqn_cpp's fvc::snGrad(p) alone (pcEqn.H:64) -- a different block from the
+    // laplacian's, defaulting to `corrected` as OpenFOAM's does (schemesLookup.C:82).
+    bool   correctedFvcSnGrad   = true;
+    scalar fvcSnGradLimitCoeff  = 0.0;
     scalar snGradLimitCoeff     = 0.0;
     bool   hasMRF               = false;   // MRF.makeRelative -- refused
     bool   hasFvOptions         = false;   // refused

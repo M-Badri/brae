@@ -896,6 +896,8 @@ Residuals rhoSimpleStep(
     pin.pRefCell             = f.pressureControl.refCell;
     pin.pRefValue            = f.pressureControl.refValue;
     pin.correctedLaplacian   = in.correctedLaplacian;
+    pin.correctedFvcSnGrad   = in.correctedFvcSnGrad;    // snGradSchemes, for the SIMPLEC fvc::snGrad(p)
+    pin.fvcSnGradLimitCoeff  = in.fvcSnGradLimitCoeff;
     pin.gradPLeastSq = in.gradPLeastSq;
     pin.gradPLimitK  = in.gradPLimitK;
     pin.snGradLimitCoeff     = in.snGradLimitCoeff;

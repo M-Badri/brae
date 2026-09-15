@@ -66,6 +66,7 @@ validation/*
 !validation/rhoTI/
 !validation/rhoKE2/
 !validation/rhoLimKE/
+!validation/rhoSnGrad/
 !validation/rhoRX/
 !validation/rhoPM/
 !validation/energyBox/

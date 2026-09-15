@@ -1893,9 +1893,24 @@ SELECTION_NOTE = {
 }
 
 
+# ofscan is a SIBLING REPO, not a build dependency: it is checked out next to brae and indexes the
+# OpenFOAM tree. Only the DERIVED half of the manifest needs it, and only these two --check tests read
+# it -- the porting workflow itself (the of-port / of-gate / of-instrument / of-measure skills) never
+# does. A box without it therefore cannot answer the drift question, which is NOT the same as the
+# manifest having drifted. Exit 77 so ctest records a SKIP; the GH200 reported a red here purely for
+# lacking the sibling checkout, and a red that means "not asked" is how a suite stops being read.
+SKIP_EXIT = 77
+
+
 def db():
     sys.path.insert(0, os.path.abspath(OFSCAN))
-    from ofscan.graph.database import Db
+    try:
+        from ofscan.graph.database import Db
+    except ImportError:
+        sys.stderr.write("SKIP: ofscan not available at %s (set OFSCAN_ROOT) -- the manifest's DERIVED\n"
+                         "      half cannot be regenerated here, so drift cannot be checked.\n"
+                         % os.path.abspath(OFSCAN))
+        sys.exit(SKIP_EXIT)
     return Db(os.path.join(os.path.abspath(OFSCAN), "ofscan.db"))
 
 
