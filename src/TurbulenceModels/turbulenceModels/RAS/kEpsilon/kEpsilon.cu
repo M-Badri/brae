@@ -643,7 +643,8 @@ void assembleTransport(
     const DeviceBuffer<scalar>& nut,
     scalar                      sigma,
     const KEpsilonInput&        in,
-    const DeviceBuffer<scalar>* bndValues = nullptr)
+    const DeviceBuffer<scalar>* bndValues = nullptr,
+    const char*                 stageTag  = nullptr)
 {
     const int nC = dm.nCells;
     const int nB = db.n;
@@ -679,6 +680,7 @@ void assembleTransport(
     sc.gradFieldLeastSq   = in.co.gradKLeastSq;
     sc.snGradLimitCoeff   = in.snGradLimitCoeff;
     sc.bndValues          = bndValues;
+    sc.stageTag           = stageTag;
     turbulence::assembleScalarTransport(M, dm, db, field, gammaFace, gammaBnd, sc);
 }
 
@@ -727,7 +729,7 @@ void assembleEpsEqn(
     deviceUpdateInletOutlet(dbEps, *in.phiBnd);
 
     assembleTransport(E, st.DepsilonEff, st.gammaEpsFace, st.gammaEpsBnd, dm, dbEps, epsilon, nut,
-                      in.co.sigmaEps, in, epsBndValues);
+                      in.co.sigmaEps, in, epsBndValues, /*stageTag=*/"eps");
 
     epsReactionKernel<<<nBlk(nC), TPB>>>(nC, dm.V.data(), in.rhoCell->data(), st.gByNu.data(), k.data(),
                                          epsilon.data(), st.divU.data(), st.divPhi.data(),
@@ -768,7 +770,8 @@ void assembleKEqn(
     }
     deviceUpdateInletOutlet(dbK, *in.phiBnd);
 
-    assembleTransport(K, st.DkEff, st.gammaKFace, st.gammaKBnd, dm, dbK, k, nut, in.co.sigmaK, in, kBndValues);
+    assembleTransport(K, st.DkEff, st.gammaKFace, st.gammaKBnd, dm, dbK, k, nut, in.co.sigmaK, in, kBndValues,
+                      /*stageTag=*/"k");
 
     kReactionKernel<<<nBlk(nC), TPB>>>(nC, dm.V.data(), in.rhoCell->data(), st.G.data(), k.data(),
                                        epsilon.data(), st.divU.data(), st.divPhi.data(),

@@ -68,6 +68,15 @@ struct TransportScheme
     bool   gradFieldLeastSq   = false;
     // `limited <psi> corrected`: caps the non-orthogonal correction per face. Zero => uncapped.
     scalar snGradLimitCoeff   = 0.0;
+    // Stage-dump tag, e.g. "eps" or "k". When set AND BRAE_DUMP_STAGE is on, the laplacian's OWN system
+    // is written as stage_<tag>LapD / <tag>LapSrc / <tag>LapDUpper / <tag>LapDLower -- the same four
+    // observables tools/dumpKEpsilon writes from OpenFOAM's own fvm::laplacian, in the same convention
+    // kEpsilon_cpp.cu::captureSystem uses (D += internalCoeffs, source += boundaryCoeffs, per boundary
+    // face). It exists because the DEVICE arm had no way to show its assembled turbulence system at all:
+    // every device-vs-host harness builds KEpsilonInput itself, so a defect in the WIRING between the
+    // driver and the closure -- which is what the dropped snGradLimitCoeff was -- reached no gate.
+    // Null by default and free when null.
+    const char* stageTag      = nullptr;
     // The field's PATCH VALUES as the gradients below must read them, when they are not what a live
     // evaluate of `db` gives. OpenFOAM's gradients read the patch field's STORED values -- those of its
     // last evaluate, plus whatever updateCoeffs assigned since (epsilonWallFunction's

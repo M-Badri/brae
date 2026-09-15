@@ -9,6 +9,7 @@
 #include "device_pcg.cuh"
 #include "device_amg.cuh"      // deviceSymGaussSeidel, when the case names a smoothSolver
 #include "device_simple.cuh"    // deviceRelaxDiag -- fvMatrix::relax
+#include "stage_dump.cuh"   // the laplacian stage dump below; free when BRAE_DUMP_STAGE is unset
 #include <cstdio>
 #include <string>
 #include <map>       // FP-10: the folded system kept per field so the solver's graph reads it in place
@@ -155,7 +156,7 @@ void assembleScalarTransport(
 
     // - fvm::laplacian(gamma, field).
     {
-        DeviceBuffer<scalar> lDiag, lUp, lLo, lIC, lBC;
+        DeviceBuffer<scalar> lDiag, lUp, lLo, lIC, lBC, lapSrc;
         deviceLaplacianCoeffs(dm, gammaFace, lDiag, lUp, lLo, sc.correctedLaplacian);
         deviceBCLaplacianCoeffsFace(db, gammaBnd, lIC, lBC);
         // FP-2: the five `axpy(-1, l, M)` subtractions in one launch (subtractLaplacianKernel above),
@@ -182,6 +183,33 @@ void assembleScalarTransport(
             // itself enters this equation with -1, so its explicit source does too. The two signs
             // compose to the reference's `L.source -= corr` followed by `M -= L`.
             deviceAxpy(-1.0, corr, M.source);
+            lapSrc = std::move(corr);
+        }
+
+        // The laplacian ON ITS OWN, as OpenFOAM's tools/dumpKEpsilon writes it (kEpsilonDump.C:348
+        // dumps fvm::laplacian(alpha*rho*DepsilonEff(), epsilon_) as a matrix of its own). SIGNS: the
+        // host reference builds L with `L.source -= corr_host` and then does `M -= L`; this arm's
+        // `corr` is already negated for the composed `M.source -= corr` above, so L.source in the
+        // reference's convention IS this `corr`. Nothing here is derived -- it is the same four arrays
+        // the solve uses, scattered the way captureSystem scatters them.
+        if (sc.stageTag && stageDumpActive() && stageDumpFirstOnly(sc.stageTag))
+        {
+            const std::vector<label>  bc  = dm.bndCell.host();
+            const std::vector<scalar> hD  = lDiag.host();
+            const std::vector<scalar> hIC = lIC.host();
+            const std::vector<scalar> hBC = lBC.host();
+            const std::vector<scalar> hSr = lapSrc.size() ? lapSrc.host() : std::vector<scalar>(hD.size(), scalar(0));
+            std::vector<scalar> D(hD), S(hSr);
+            for (std::size_t f = 0; f < bc.size() && f < hIC.size(); ++f)
+            {
+                D[static_cast<std::size_t>(bc[f])] += hIC[f];
+                S[static_cast<std::size_t>(bc[f])] += hBC[f];
+            }
+            const std::string tag(sc.stageTag);
+            stageDump(tag + "LapD",      D);
+            stageDump(tag + "LapSrc",    S);
+            stageDump(tag + "LapDUpper", lUp);
+            stageDump(tag + "LapDLower", lLo);
         }
     }
 }
