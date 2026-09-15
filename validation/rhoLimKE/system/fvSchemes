@@ -1,0 +1,33 @@
+FoamFile { version 2.0; format ascii; class dictionary; object fvSchemes; }
+
+ddtSchemes      { default steadyState; }
+gradSchemes     { default Gauss linear; }
+
+divSchemes
+{
+    default         none;
+    div(phi,U)      bounded Gauss upwind;
+    div(phi,h)      bounded Gauss upwind;
+    div(phi,e)      bounded Gauss upwind;
+    div(phi,K)      bounded Gauss upwind;
+    div(phi,Ekp)    bounded Gauss upwind;
+    div(phi,k)      bounded Gauss upwind;
+    div(phi,epsilon) bounded Gauss upwind;
+    div(((rho*nuEff)*dev2(T(grad(U))))) Gauss linear;
+}
+
+// THE POINT OF THIS FIXTURE. `limited <psi>` caps the non-orthogonal correction per face
+// (OpenFOAM limitedSnGrad, min(k*|orth|/((1-k)*|corr|+SMALL),1)), and the laplacian entry carries
+// its OWN snGrad scheme, so this applies to laplacian(DkEff,k) and laplacian(DepsilonEff,epsilon)
+// exactly as it does to laplacian(muEff,U). Every other rho fixture in validation/ is `corrected`
+// or `orthogonal`, which is why nothing could see the turbulence closure running uncapped.
+laplacianSchemes { default Gauss linear limited 0.33; }
+
+// Held equal to the laplacian's on purpose. These two blocks govern different operators in OpenFOAM
+// and brae's parser currently folds them into one flag (scheme_parse.cuh:695), so a fixture where
+// they DISAGREE would measure that defect as well and confound this gate. Keeping them consistent
+// isolates the one thing under test: whether the cap reaches the turbulence closure.
+snGradSchemes   { default limited 0.33; }
+
+interpolationSchemes { default linear; }
+wallDist        { method meshWave; }

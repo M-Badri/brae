@@ -122,7 +122,6 @@ validation/pitzDailyKOmega/*
 !validation/roundtrip_vs_openfoam.sh
 piscaglia_mdpi.pdf
 test_eval_scoped.tmpdict
-validation/rhoLimKE/
 
 # CTest-generated output (regenerated on every ctest run)
 Testing/
