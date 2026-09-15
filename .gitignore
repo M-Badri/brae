@@ -89,6 +89,44 @@ validation/pitzDailyKOmega/*
 !validation/pitzDailyKOmega/0/
 !validation/pitzDailyKOmega/constant/
 !validation/pitzDailyKOmega/system/
+
+# The six fixtures behind the remaining SILENT skips, added 2026-09-15. Every one of the 12 non-manifest
+# skips in CI was a missing fixture, not a missing tool -- and a skip is worse than a failure because the
+# suite still reads green. Same scoping rule as above: the identity gates take an ITERATION COUNT
+# (`duct3d_cf 20`, `cav3d_cf 30`), not a reference time, so only 0/constant/system is tracked and the
+# leftover local run output (cav3d_cf 193/202, duct3d_cf 151) stays out.
+!validation/piov/
+# simple_piov_vs_openfoam compares against OpenFOAM's own converged answer, which lives in a SEPARATE
+# fixture: it asks for validation/piov_of/393. 752 KB, and without it the gate skips even with piov present.
+!validation/piov_of/
+!validation/channel/
+!validation/tracerBox/
+!validation/cav3d_cf/
+validation/cav3d_cf/*
+!validation/cav3d_cf/0/
+!validation/cav3d_cf/constant/
+!validation/cav3d_cf/system/
+!validation/duct3d_cf/
+validation/duct3d_cf/*
+!validation/duct3d_cf/0/
+!validation/duct3d_cf/constant/
+!validation/duct3d_cf/system/
+!validation/rotatingCylinders/
+validation/rotatingCylinders/*
+!validation/rotatingCylinders/0/
+!validation/rotatingCylinders/constant/
+!validation/rotatingCylinders/system/
+
+# empty_direction_vs_openfoam's ORACLE IS OPENFOAM'S OWN LOG, not a field: it counts `Solving for Uz`
+# lines -- 0 in the 2D case, 147 in the 3D one -- to prove brae skips the empty direction exactly as
+# OpenFOAM does. Only log.sf is read. The directories holding them are 9.7 MB and 20 MB of run output;
+# tracking just the two logs costs 388 KB.
+!validation/t3a_of/
+validation/t3a_of/*
+!validation/t3a_of/log.sf
+!validation/duct3d_of/
+validation/duct3d_of/*
+!validation/duct3d_of/log.sf
 !validation/rhoRX/
 !validation/rhoPM/
 !validation/energyBox/
