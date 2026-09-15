@@ -143,15 +143,33 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="$arch" || 
 "cmake configure failed, usually a missing library.
   On Ubuntu/Debian:  sudo apt-get install -y libopenmpi-dev openmpi-bin libscotch-dev zlib1g-dev"
 
+# ---- which executables must exist next to `brae` ----
+# Taken from the dispatch registry itself rather than written out a second time here. `brae` is the only
+# command a user types; a case naming `rhoSimpleFoam` in controlDict is exec'd into the sibling binary
+# brae_rhoSimpleFoam (solver_dispatch.cuh execSibling), so every executable in that table has to be built
+# AND installed or the hand-over dies with "cannot start 'brae_rhoSimpleFoam'".
+#
+# It did. This list used to read `for b in brae brae_pimpleFoam`, and brae_rhoSimpleFoam -- a registered
+# solver since the OF-mirror port -- was built (add_dependencies at CMakeLists.txt:1750) and then left in
+# build/. A fresh install could run no compressible case at all. Deriving the list means the next solver
+# row cannot repeat it.
+SOLVERS=$(sed -n 's/.*{"[A-Za-z]*", *"\(brae[A-Za-z_]*\)".*/\1/p' \
+          src/applications/solvers/common/solver_dispatch.cuh | sort -u)
+[ -n "$SOLVERS" ] || SOLVERS="brae brae_pimpleFoam brae_rhoSimpleFoam"   # registry unreadable: known set
+say "solvers to build: $(echo $SOLVERS | tr '\n' ' ')"
+
 jobs=$(nproc 2>/dev/null || echo 4)
 say "building brae with $jobs jobs (this can take a few minutes)"
-cmake --build build -j "$jobs" --target brae || die "build failed"
+# Every solver target by name. `brae` alone happens to pull the others in through add_dependencies today,
+# but that is a fact about the current CMakeLists, not a promise, and this install depends on all of them.
+cmake --build build -j "$jobs" --target $SOLVERS || die "build failed"
 
 # ---- install the binaries ----
-# `brae` is the only command; the solvers it hands cases to (brae_pimpleFoam today) come along as build
-# dependencies and are looked up next to it, so they install side by side.
 mkdir -p "$BINDIR"
-for b in brae brae_pimpleFoam; do
+for b in $SOLVERS; do
+    [ -f "build/$b" ] || die "build/$b is missing after a successful build.
+  It is in the solver registry (src/applications/solvers/common/solver_dispatch.cuh), so `brae` will try
+  to hand cases to it and fail. Check that CMakeLists.txt still defines the target."
     install -m 0755 "build/$b" "$BINDIR/$b" 2>/dev/null || cp "build/$b" "$BINDIR/$b"
     say "installed  $BINDIR/$b"
 done
