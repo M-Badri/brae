@@ -308,3 +308,32 @@ Two things that look like fixes and are not, both recorded because each cost a c
   `wmkdepend`.
 
 The reproducer is now minimal -- one library, one flag, one machine -- and belongs upstream with spuma.
+
+## CORRECTION: spuma DOES build for Hopper. It is the SDK, not the architecture (2026-09-14)
+
+The section above ("Why spuma has no column: it builds for Blackwell and not for Hopper") is superseded.
+spuma was built on the GH200 after it was written and has a column for all six cases at native, 1M and
+10M -- `bench/results/gh200_csv/spuma_tuned_gh200.csv`, 20 rows.
+
+What the architecture experiment actually showed was that cc90 collides and cc121 does not UNDER SDK
+26.5. That is true, and it is not the whole variable. Changing only the SDK, at cc90:
+
+| toolchain | `-gpu=cc90`, RDC on |
+|---|---|
+| HPC SDK 26.5 | duplicate `__cudaRegisterLinkedBinary` under device link, build fails |
+| HPC SDK 2026 | **builds clean** |
+
+So 26.5's device linker emits duplicate registration symbols for cc80 and cc90 under relocatable device
+code, and 2026 fixes it. cc121 was never affected, which is why the GB10 tree -- only ever built cc121 --
+looked like evidence for a path or machine difference.
+
+**Why 26.5 was pinned in the first place, and why that was wrong.** An early attempt with 2026 failed,
+and the failure was read as "2026 does not work". It was the LINKER: GNU ld overflows the aarch64 GOT
+linking `libOpenFOAM.so`, which happens under both SDKs and had not yet been fixed with the lld shim.
+Two independent faults were being changed at once, and the wrong one was blamed. Fixing the linker first
+and only then varying the SDK is what separated them.
+
+The working recipe is committed as `bench/rhoSimpleFoam/spuma_build_hopper.sh`. Three things must all
+hold: SDK 2026, lld for `LINKLIBSO` only (GNU ld for executables, since lld rejects the `--add-needed`
+wmake passes when linking an application), and RDC left ON -- `-gpu=nordc` completes the build and
+produces a binary with no device code in it.

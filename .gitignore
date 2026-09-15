@@ -135,3 +135,7 @@ bench/rhoSimpleFoam/FASTPATH.md
 # spuma's extrapolated numbers are projections, not measurements, and are kept out of the repo so they
 # can never be mistaken for the measured benchmark walls beside them (asked 2026-09-14).
 bench/rhoSimpleFoam/spuma_extrapolation/
+
+# The clip renderers are pvbatch scripts for making videos, not part of the port or its validation.
+# They live beside the visual runs in ~/space and are kept out of the repo (asked 2026-09-15).
+bench/rhoSimpleFoam/render_*.py
