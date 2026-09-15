@@ -11,7 +11,21 @@ validation/*
 !validation/cyclicChannel/
 !validation/cyclicChannelAMI/
 !validation/cyclicWedge/
+!validation/airFoil2D/
+!validation/rotorDisk/
+!validation/turbineSiting/
+!validation/T3A/
+!validation/pipeCyclicAMI/
+!validation/pipeCyclicAMIConformal/
+!validation/pipeCyclic/
+!validation/implicitAMI/
+!validation/windAroundBuildingsBox/
 !validation/kEpsCase/
+!validation/incFR/
+!validation/pimFR/
+!validation/liqBox/
+!validation/liqBoxRAS/
+!validation/mixerVessel2D/
 !validation/kEpsCorrect/
 !validation/komegaCoeffs/
 !validation/lmFlatPlate/
@@ -23,11 +37,22 @@ validation/*
 !validation/mrfBox/
 !validation/of_apps/
 !validation/pitzDaily/
+!validation/pitzDailyRKE/
+!validation/pitzDailySST/
+!validation/simpleCarPorous/
 !validation/pitzDaily282/
 !validation/pitzDailyTurb/
 !validation/pitzDailyTurbBig/
 !validation/rhoBox/
 !validation/rhoBoxE/
+!validation/ablBox/
+!validation/simpleBoxIO/
+!validation/rhoBoxDF/
+!validation/rhoBoxSym/
+!validation/rhoBoxTP/
+!validation/rhoBoxF/
+!validation/rhoBoxP/
+!validation/simpleBoxP/
 !validation/rhoSuth/
 !validation/rhoLU/
 !validation/rhoTP/
@@ -40,6 +65,8 @@ validation/*
 !validation/rhoIO/
 !validation/rhoTI/
 !validation/rhoKE2/
+!validation/rhoLimKE/
+!validation/rhoSnGrad/
 !validation/rhoRX/
 !validation/rhoPM/
 !validation/energyBox/
@@ -55,6 +82,14 @@ validation/*
 !validation/sa_vs_openfoam.sh
 !validation/io_vs_openfoam.sh
 !validation/ti_vs_openfoam.sh
+!validation/abl_vs_openfoam.sh
+!validation/adjm_vs_openfoam.sh
+!validation/df_vs_openfoam.sh
+!validation/sym_vs_openfoam.sh
+!validation/tpm_vs_openfoam.sh
+!validation/tf_vs_openfoam.sh
+!validation/ffp_vs_openfoam.sh
+!validation/ffpi_vs_openfoam.sh
 !validation/ke2_vs_openfoam.sh
 !validation/rx_vs_openfoam.sh
 !validation/pm_vs_openfoam.sh
@@ -63,6 +98,9 @@ validation/*
 !validation/restart_vs_openfoam.sh
 !validation/flowrate_vs_openfoam.sh
 !validation/roundtrip_vs_openfoam.sh
+piscaglia_mdpi.pdf
+test_eval_scoped.tmpdict
+validation/rhoLimKE/
 
 # CTest-generated output (regenerated on every ctest run)
 Testing/
@@ -85,3 +123,24 @@ demo/delta/constant/polyMesh/
 demo/delta/constant/extendedFeatureEdgeMesh/
 demo/delta/constant/triSurface/*
 !demo/delta/constant/triSurface/README
+
+# wmake build output for the OpenFOAM oracle utilities under tools/. tools/dumpPEqn had its
+# Make/linuxARM64GccDPInt32Opt/ committed by accident; nothing regenerates from it and nothing reads it.
+tools/*/Make/linux*/
+
+.claude/*
+manifest/*
+CLAUDE.md
+src/applications/solvers/rhoSimpleFoam/PORT.md
+src/applications/solvers/rhoSimpleFoam/REFUSALS.md
+bench/rhoSimpleFoam/FASTPATH.md
+!validation/slipTurb
+.rho_h_plans.md
+
+# spuma's extrapolated numbers are projections, not measurements, and are kept out of the repo so they
+# can never be mistaken for the measured benchmark walls beside them (asked 2026-09-14).
+bench/rhoSimpleFoam/spuma_extrapolation/
+
+# The clip renderers are pvbatch scripts for making videos, not part of the port or its validation.
+# They live beside the visual runs in ~/space and are kept out of the repo (asked 2026-09-15).
+bench/rhoSimpleFoam/render_*.py

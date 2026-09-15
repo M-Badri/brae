@@ -57,6 +57,23 @@ void deviceGbyNuLimit(const DeviceBuffer<scalar>& GbyNu0, const DeviceBuffer<sca
 void deviceDEff(const DeviceBuffer<scalar>& F1, const DeviceBuffer<scalar>& nut, scalar alpha1, scalar alpha2,
                 scalar nu, DeviceBuffer<scalar>& D);
 
+// FP-2 fusions (device_komega_sst.cu, bottom): the chains above in one launch each, bit-identical.
+void deviceSstProduction(const DeviceBuffer<scalar>& gradU, const DeviceBuffer<scalar>& nut, int nC,
+                         DeviceBuffer<scalar>& S2, DeviceBuffer<scalar>& GbyNu0, DeviceBuffer<scalar>& G);
+void deviceSstCdF1F2(
+    const DeviceBuffer<scalar>& gKx, const DeviceBuffer<scalar>& gKy, const DeviceBuffer<scalar>& gKz,
+    const DeviceBuffer<scalar>& gOx, const DeviceBuffer<scalar>& gOy, const DeviceBuffer<scalar>& gOz,
+    const DeviceBuffer<scalar>& k, const DeviceBuffer<scalar>& omega, const DeviceBuffer<scalar>& y,
+    scalar nu, const KOmegaSSTCoeffs& co, bool lm, const DeviceBuffer<scalar>* nuCell,
+    DeviceBuffer<scalar>& CD, DeviceBuffer<scalar>& F1, DeviceBuffer<scalar>& F2);
+void deviceSstBlendLimit(
+    const DeviceBuffer<scalar>& F1, const DeviceBuffer<scalar>& F2, const DeviceBuffer<scalar>& S2,
+    const DeviceBuffer<scalar>& GbyNu0, const DeviceBuffer<scalar>& omega, const KOmegaSSTCoeffs& co,
+    DeviceBuffer<scalar>& gamma, DeviceBuffer<scalar>& beta, DeviceBuffer<scalar>& GbyNu);
+void deviceDEffRho(
+    const DeviceBuffer<scalar>& F1, const DeviceBuffer<scalar>& nut, scalar alpha1, scalar alpha2,
+    const DeviceBuffer<scalar>& rho, const DeviceBuffer<scalar>& nuField, DeviceBuffer<scalar>& D);
+
 // omega reaction (adds to diag + source, the deviceSolveScalarTransport reaction). Mirrors the omega block of
 // kOmegaSSTBase::correct() (incompressible): production gamma*GbyNu0lim (Su) - SuSp((2/3)gamma divU) -
 // Sp(beta omega) - SuSp((F1-1)CDkOmega/omega).  SuSp(s): diag+=V*max(s,0), source-=V*min(s,0)*omega.
@@ -72,7 +89,11 @@ void deviceWallOmegaG0(const DeviceWallData& w, const DeviceBuffer<scalar>& k, c
                        const DeviceBuffer<scalar>& Uy, const DeviceBuffer<scalar>& Uz, scalar nu,
                        DeviceBuffer<scalar>& omega0, DeviceBuffer<scalar>& G0, const KOmegaSSTCoeffs& co, int nutWall = 0,
                        scalar atmZ0 = 0.0, bool atmBoundNut = true,   // z0>0 -> atmNutkWallFunction (rough) for the G0 wall nut
-                       const DeviceBuffer<scalar>* nuFace = nullptr);   // compressible: nu = mu_b/rho_b per WALL face
+                       const DeviceBuffer<scalar>* nuFace = nullptr,   // compressible: nu = mu_b/rho_b per WALL face
+                       // The STORED wall nut in WALL-face order, as omegaWallFunction reads it
+                       // (omegaWallFunctionFvPatchScalarField.C:199-200). Null keeps the
+                       // recomputed nutkWallFunction -- the kEpsilon twin has the same argument.
+                       const DeviceBuffer<scalar>* nutwStored = nullptr);
 
 // nut at boundary faces for the SST, evaluated as OF's field assignment fills it (see the .cu).
 void deviceSSTNutBoundary(const DeviceVectorBoundary& dbU, const DeviceBuffer<scalar>& kBnd,

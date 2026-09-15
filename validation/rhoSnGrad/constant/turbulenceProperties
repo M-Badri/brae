@@ -1,0 +1,8 @@
+FoamFile { version 2.0; format ascii; class dictionary; object turbulenceProperties; }
+simulationType laminar;
+
+// LAMINAR ON PURPOSE. The finding this fixture exists for is a PRESSURE-side one --
+// fvc::snGrad(p) in the SIMPLEC correction, plus the laplacian scheme that the snGradSchemes block
+// used to overwrite -- and a kEpsilon closure only adds noise to it. Measured on the RAS version of
+// this same case, brae vs OpenFOAM at iteration 1: p 1.88e-07 turbulent against 4.14e-09 laminar,
+// a factor of 45 of closure drift sitting on top of the signal.

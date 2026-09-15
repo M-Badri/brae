@@ -1,0 +1,5 @@
+host,gpu,cpu,ncores,case,target,ncells,arm,iters_asked,iters_done,wall_s,ms_per_iter,ns_per_cell,status
+192-222-51-196,NVIDIA GH200 480GB,aarch64,64,squareBend,15000,14200,spuma,100,100,8.522,85.22,6001.4,ok
+192-222-51-196,NVIDIA GH200 480GB,aarch64,64,squareBend,100000,97470,spuma,100,100,26.322,263.22,2700.5,ok
+192-222-51-196,NVIDIA GH200 480GB,aarch64,64,squareBend,1000000,896000,spuma,100,100,139.319,1393.19,1554.9,ok
+192-222-51-196,NVIDIA GH200 480GB,aarch64,64,squareBend,10000000,7168000,spuma,100,100,1326.210,13262.10,1850.2,ok
