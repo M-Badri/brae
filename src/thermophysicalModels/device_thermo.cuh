@@ -119,8 +119,15 @@ void deviceH2OEnergyToT(
     DeviceBuffer<scalar>& T,
     DeviceBuffer<label>& ok,
     DeviceBuffer<scalar>& residual,
-    scalar tol = 1e-12,
-    int maxIter = 50);
+    // The 5th argument of h2oEnergyToT is residualBound, a POST-CHECK on the answer -- NOT a stopping
+    // tolerance. It reached here as `tol = 1e-12`, a leftover from before e441dfc, when brae iterated to
+    // a 1e-12 energy residual instead of transcribing OpenFOAM's step-based loop. The host arm calls
+    // h2oEnergyToT with no 5th argument and so gets the calibrated 1e-3 (nsrds_functions.cuh: asserting
+    // 1e-9 there "would reject OpenFOAM's own answers"); the device arm demanded 1e-12 and reported
+    // perfectly good inversions as failures -- 8 of 52 cells at a residual of 5.4e-11. Same inversion,
+    // two different convergence criteria, host against device. maxIter matches OF thermo.C:36.
+    scalar residualBound = 1e-3,
+    int maxIter = 100);
 
 void deviceH2OHToT(
     const DeviceBuffer<scalar>& hTarget,
@@ -128,8 +135,8 @@ void deviceH2OHToT(
     DeviceBuffer<scalar>& T,
     DeviceBuffer<label>& ok,
     DeviceBuffer<scalar>& residual,
-    scalar tol = 1e-12,
-    int maxIter = 50);
+    scalar residualBound = 1e-3,   // see deviceH2OEnergyToT above
+    int maxIter = 100);
 
 void deviceThermoLiquidProperties(
     DeviceThermo& th,

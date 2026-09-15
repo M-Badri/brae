@@ -193,6 +193,25 @@ BRAE_HD inline HeToTResult h2oEnergyToT(
     //
     // OF raises a FatalError on the iteration cap; here that is reported through `converged` and the
     // caller throws, because this is BRAE_HD and runs on the device.
+
+    // OF REFUSES A NEGATIVE INITIAL TEMPERATURE outright -- thermoI.H:55-60 guards `if (T0 < 0)` and
+    // raises FatalErrorInFunction << ... << abort(FatalError) BEFORE the first step. It is not a
+    // tolerance question: OF will not invert from a negative guess at all. Measured 2026-09-15 by
+    // handing tools/liqref T0 = -500, which core-dumped on exactly that line.
+    //
+    // brae is BRAE_HD and cannot throw on the device, so the refusal is reported through `converged`
+    // and the caller throws -- the same contract the iteration cap uses. It is a refusal either way:
+    // running the loop anyway and returning the answer, which an earlier fabs(T0) on Ttol did, accepts
+    // input OpenFOAM rejects and is the silent substitution this project keeps finding.
+    if (T0 < scalar(0))
+    {
+        r.T          = T0;
+        r.iterations = 0;
+        r.residual   = scalar(INFINITY);
+        r.converged  = false;
+        return r;
+    }
+
     scalar Test = T0;
     scalar Tnew = T0;
     const scalar Ttol = T0 * scalar(1.0e-4);
@@ -212,9 +231,16 @@ BRAE_HD inline HeToTResult h2oEnergyToT(
     // The correlation range as a POST-CHECK rather than a projection: H2O's fits are defined on
     // [Tt, Tc] and an answer outside them is not a temperature this substance has, so the caller must
     // hear about it -- but the iterate path stays OpenFOAM's.
+    // The range check gets a pad, and inRange itself is left strict because other callers use it as a
+    // semantic predicate. When the TARGET is a bound, Newton lands on it to about 1e-09 K and a strict
+    // test then rejects an answer correct to thirteen digits -- measured, 273.16 recovered from Tc with a
+    // residual of 5.09e-13 and converged = 0. 1e-6 K is ~3e-9 of [Tt, Tc] and cannot hide a genuine miss:
+    // an unattainable energy lands hundreds of kelvin out (the unreachable case clamps to -215.94).
+    const scalar Tpad = scalar(1.0e-6);
     r.converged  = !blewUp
                 && r.residual <= residualBound
-                && H2OLiquid::inRange(Tnew);
+                && Tnew >= H2OLiquid::Tt - Tpad
+                && Tnew <= H2OLiquid::Tc + Tpad;
     return r;
 }
 
@@ -223,11 +249,13 @@ BRAE_HD inline HeToTResult h2oEnergyToT(
 BRAE_HD inline HeToTResult h2oHToT(
     scalar hTarget,
     scalar T0,
-    scalar tol     = 1e-12,
-    int    maxIter = 50,
-    scalar hScale  = 1e2)
+    // residualBound, not a stopping tolerance -- the 5th argument of h2oEnergyToT. 1e-12 here was the
+    // same leftover the device path carried, and it rejected answers the host path accepts.
+    scalar residualBound = 1e-3,
+    int    maxIter       = 100,    // OF thermo.C:36
+    scalar hScale        = 1e2)
 {
-    return h2oEnergyToT(EnergyForm::sensibleEnthalpy, hTarget, 0.0, T0, tol, maxIter, hScale);
+    return h2oEnergyToT(EnergyForm::sensibleEnthalpy, hTarget, 0.0, T0, residualBound, maxIter, hScale);
 }
 
 }   // namespace brae

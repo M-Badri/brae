@@ -796,7 +796,7 @@ void deviceH2OEnergyToT(
     DeviceBuffer<scalar>& T,
     DeviceBuffer<label>& ok,
     DeviceBuffer<scalar>& residual,
-    scalar tol,
+    scalar residualBound,
     int maxIter)
 {
     const int n = static_cast<int>(target.size());
@@ -805,7 +805,7 @@ void deviceH2OEnergyToT(
     ok.resize(n);
     residual.resize(n);
     h2oEnergyToTK<<<nBlocks(n), TPB>>>(
-        n, form, tol, maxIter,
+        n, form, residualBound, maxIter,
         target.data(),
         (p && p->size() == target.size()) ? p->data() : nullptr,
         Tguess.data(),
@@ -822,10 +822,10 @@ void deviceH2OHToT(
     DeviceBuffer<scalar>& T,
     DeviceBuffer<label>& ok,
     DeviceBuffer<scalar>& residual,
-    scalar tol,
+    scalar residualBound,
     int maxIter)
 {
-    deviceH2OEnergyToT(EnergyForm::sensibleEnthalpy, hTarget, nullptr, Tguess, T, ok, residual, tol, maxIter);
+    deviceH2OEnergyToT(EnergyForm::sensibleEnthalpy, hTarget, nullptr, Tguess, T, ok, residual, residualBound, maxIter);
 }
 
 } // namespace brae
