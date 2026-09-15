@@ -65,6 +65,7 @@ validation/*
 !validation/rhoIO/
 !validation/rhoTI/
 !validation/rhoKE2/
+!validation/rhoLimKE/
 !validation/rhoRX/
 !validation/rhoPM/
 !validation/energyBox/
@@ -96,6 +97,9 @@ validation/*
 !validation/restart_vs_openfoam.sh
 !validation/flowrate_vs_openfoam.sh
 !validation/roundtrip_vs_openfoam.sh
+piscaglia_mdpi.pdf
+test_eval_scoped.tmpdict
+validation/rhoLimKE/
 
 # CTest-generated output (regenerated on every ctest run)
 Testing/

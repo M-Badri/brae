@@ -643,9 +643,19 @@ DeviceSolverPerf deviceAMGPCG(
     int minIter)
 {
     announceNormFactorMode();
-    static const bool pcgDev = std::getenv("BRAE_PCG_DEVICE") == nullptr || std::string(std::getenv("BRAE_PCG_DEVICE")) != "0";
-    if (pcgDev && !corrScaling && !normFactorOnHost())
-        return deviceAMGPCGGraph(A, amg, b, psi, dNormFactor, tol, relTol, maxIter, minIter);
+#ifdef BRAE_HAS_GS_DEVICE
+    // deviceAMGPCGGraph is DEFINED inside this guard (it needs CUDA 13's conditional graph nodes), so the
+    // call has to sit inside it too. Without the guard this translation unit does not compile on a CUDA 12
+    // toolchain -- `identifier "deviceAMGPCGGraph" is undefined` -- which is the same defect as the
+    // `neumannPrecon` one the GH200 found on 2026-09-13, in a different file. Found the same way, by
+    // building on a second machine: the GH200's apt nvcc is 12.8 and won over the CUDA 13 installed
+    // beside it. The sibling call at :472 was already guarded; this one was not.
+    {
+        static const bool pcgDev = std::getenv("BRAE_PCG_DEVICE") == nullptr || std::string(std::getenv("BRAE_PCG_DEVICE")) != "0";
+        if (pcgDev && !corrScaling && !normFactorOnHost())
+            return deviceAMGPCGGraph(A, amg, b, psi, dNormFactor, tol, relTol, maxIter, minIter);
+    }
+#endif
     return deviceAMGPCG(A, amg, b, psi, deviceReadScalar(dNormFactor), tol, relTol, maxIter, captureVcycle, checkEvery, corrScaling, minIter);
 }
 

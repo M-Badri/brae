@@ -2164,6 +2164,15 @@ add_test(NAME rho_limiters_vs_openfoam
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_limiters_vs_openfoam.sh)
 set_tests_properties(rho_limiters_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77)
 
+# The TURBULENCE half of the same scheme, which rho_limiters_vs_openfoam above cannot reach: its fixture
+# is laminar by its own header, so no turbulence laplacian is exercised under a cap. Assembly level,
+# against OpenFOAM's own fvm::laplacian via tools/dumpKEpsilon; measured ARM 1.71e-11 against a CONTROL of
+# 6.65e-06, and it fails at 6.65e-06 with the forwarding line in rhoTurbulenceHook.cu commented out.
+# Skips (77) when libdumpKEpsilon.so has not been built -- cd tools/dumpKEpsilon && wmake libso.
+add_test(NAME rho_turb_laplacian_limiter_vs_openfoam
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/rho_turb_laplacian_limiter_vs_openfoam.sh)
+set_tests_properties(rho_turb_laplacian_limiter_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+
 add_test(NAME tpm_vs_openfoam
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/validation/tpm_vs_openfoam.sh)
 set_tests_properties(tpm_vs_openfoam PROPERTIES SKIP_RETURN_CODE 77 LABELS slow)
