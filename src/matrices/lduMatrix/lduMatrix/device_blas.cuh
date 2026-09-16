@@ -89,5 +89,9 @@ void deviceReadScalarWaitProbe();
 // The stage-1 partials buffer behind every reduction is grown on demand and the old one FREED. A graph that
 // captured a reduction holds that pointer; compare this before replaying and recapture when it changed.
 int deviceReductionScratchEpoch();
+// Bumped when long-lived device memory is released (solver teardown), so a captured graph keyed on
+// pointers cannot be replayed after the pool reissued those addresses to a different owner.
+int deviceGraphGeneration();
+void bumpDeviceGraphGeneration();
 
 } // namespace brae

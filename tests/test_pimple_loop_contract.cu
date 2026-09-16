@@ -131,8 +131,12 @@ int main()
         // Tolerances nothing can fail, so the leg tests the ITERATION ACCOUNTING -- OF's corr_ == 1
         // cannot satisfy, corr_ == 2 only stores the reference, corr_ == 3 is the earliest exit -- and
         // not this synthetic box's residual magnitudes, which are not the contract under test.
+        // U ONLY, and deliberately. This box has no fixed-value pressure patch, so its p system is
+        // all-Neumann and singular; with no reference cell the pressure solve returns a NON-FINITE
+        // final residual, which used to read as "never satisfied" and silently ran every corrector.
+        // brae now refuses a non-finite residual by name (device_simple_foam.cu), so a p entry here
+        // would throw rather than test the iteration accounting this leg is about.
         ctl.outerResidualControl.push_back({"U", scalar(1e30), scalar(0)});
-        ctl.outerResidualControl.push_back({"p", scalar(1e30), scalar(0)});
         auto f = makeSolver(ctl);
         DeviceSimpleSolver s(m, g, fvp, std::get<0>(f), std::get<1>(f), std::get<2>(f), std::get<3>(f));
         s.resetLoopCounters();
@@ -149,7 +153,15 @@ int main()
         DeviceSimpleControls ctl;
         ctl.nu = 1e-3;
         ctl.turbulent = false;
-        ctl.outerResidualControl.push_back({"p", scalar(1e-300), scalar(0)});
+        // BOTH tolerances zero, which OF's own test can never satisfy: `absTol > 0` and `relTol > 0`
+        // both gate their comparison, so a zero tolerance is unsatisfiable by construction.
+        //
+        // It used to be `{"p", 1e-300, 0}`, and it passed for the wrong reason: p's residual is
+        // NON-FINITE on this reference-free box (all-Neumann, no pRefCell), so nothing could ever
+        // satisfy it whatever the number -- the control was testing the NaN, not the tolerance. And a
+        // tight-but-positive tolerance on U does not work either: U converges to EXACTLY 0 here, so
+        // even 1e-300 is met. Zero is the only unreachable setting this fixture admits.
+        ctl.outerResidualControl.push_back({"U", scalar(0), scalar(0)});
         auto f = makeSolver(ctl);
         DeviceSimpleSolver s(m, g, fvp, std::get<0>(f), std::get<1>(f), std::get<2>(f), std::get<3>(f));
         s.resetLoopCounters();

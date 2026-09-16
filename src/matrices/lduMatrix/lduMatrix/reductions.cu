@@ -341,6 +341,32 @@ int deviceReductionScratchEpoch()
 }
 
 
+// DEVICE-BUFFER GENERATION. deviceReductionScratchEpoch above invalidates a captured graph when the
+// REDUCTION SCRATCH is regrown. The same hazard exists for every other buffer a graph bakes in, and the
+// pointer keys the caches use cannot see it: the device pool hands a freed block straight back to the
+// next same-size request, so a destroyed solver's psi, matrix and AMG hierarchy can all be reissued at
+// their old addresses to the next one. Every key then matches and a stale graph replays against memory
+// that now belongs to someone else.
+//
+// Measured: tests/test_mean_velocity_force builds three solvers on one mesh; the second reused the
+// first's captured BiCGStab graph and faulted with an illegal memory access inside the replay
+// (compute-sanitizer, 2026-09-16). Forcing recapture on every call fixed it and cost the cache entirely.
+//
+// Bumped when long-lived device memory is released -- solver teardown -- not on the per-iteration
+// temporaries the pool churns, so a steady run never invalidates and the cache keeps its value.
+namespace { int g_deviceGraphGeneration = 0; }
+
+int deviceGraphGeneration()
+{
+    return g_deviceGraphGeneration;
+}
+
+void bumpDeviceGraphGeneration()
+{
+    ++g_deviceGraphGeneration;
+}
+
+
 namespace {
 
 // THE READ-BACK MAILBOX. deviceReadScalar was a blocking cudaMemcpy, and the driver returned from it only

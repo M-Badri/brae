@@ -80,6 +80,11 @@ public:
         // the previous run's CONSERVATIVE interface flux or an un-coupled placeholder.
         bool                          phiWasRead = false);
 
+    // Releases every long-lived device buffer this solver owns back to the pool, where the next solver
+    // can be handed the same addresses. Any CUDA graph captured against them is then stale, and the
+    // pointer keys those caches use cannot tell -- so bump the generation they also check.
+    ~DeviceSimpleSolver();
+
     // OF turbulence-model load sequence, ported byte-for-byte (do NOT skip, this is why OF never blows up on a
     // case cf does): (1) the model ctor bounds the read fields  [kEpsilon.C:105-106 bound(k_,kMin_); bound(epsilon_,...);
     // kOmegaSSTBase.C:200-201 bound(k_,kMin_); bound(omega_,omegaMin_)]  and (2) simpleFoam.C:92 turbulence->validate()

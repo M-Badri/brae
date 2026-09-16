@@ -244,6 +244,10 @@ struct BiCGGraphCache
     // one's address), so the level-0 coarse diagonal -- reallocated by every rebuild -- keys it too.
     const void* amg = nullptr;
     const void* amgCoarseDiag = nullptr;
+    // ...and the device-buffer generation, because EVERY pointer above can alias: the pool hands a
+    // destroyed solver's blocks straight back to the next one, so all of these can match while the
+    // captured graph points at memory that changed owner. Bumped on solver teardown only.
+    int generation = -1;
     // ...and the Neumann series' degree, because the captured body unrolls it: a replay under a
     // different degree would run the degree it was captured with, silently.
     int polyDeg = -1;
@@ -407,7 +411,8 @@ bool deviceJacobiBiCGStabGraph(const DeviceLduView& A, const DeviceBuffer<scalar
                         || (stable && (c.capSrc[0] != src[0] || c.capSrc[1] != src[1]
                                     || c.capSrc[2] != src[2] || c.capSrc[3] != src[3]))
                         || c.owner != (const void*)A.owner || c.nC != nC || c.diluRD != diluRD || c.diluLevels != diluLv
-                        || c.scratchEpoch != epoch || c.amg != (const void*)amg || c.amgCoarseDiag != amgCD;
+                        || c.scratchEpoch != epoch || c.amg != (const void*)amg || c.amgCoarseDiag != amgCD
+                        || c.generation != deviceGraphGeneration();
     if (recapture)
     {
         if (c.exec)  { cudaGraphExecDestroy(c.exec);  c.exec = nullptr; }
@@ -479,7 +484,7 @@ bool deviceJacobiBiCGStabGraph(const DeviceLduView& A, const DeviceBuffer<scalar
         c.key = psi.data(); c.tol = tol; c.relTol = relTol; c.maxIter = maxIter; c.minIter = minIter;
         c.precon = useDilu ? (const void*)precon : nullptr;
         c.polyDeg = polyDeg;
-        c.owner = A.owner; c.nC = nC; c.diluRD = diluRD; c.diluLevels = diluLv; c.scratchEpoch = epoch;
+        c.owner = A.owner; c.nC = nC; c.diluRD = diluRD; c.diluLevels = diluLv; c.scratchEpoch = epoch; c.generation = deviceGraphGeneration();
         c.amg = amg; c.amgCoarseDiag = amgCD;
     }
     static bool announced = false;

@@ -442,8 +442,14 @@ inline std::string expandDictVariables(const std::string& rawIn)
             if (text[i] != '$')
             {
                 const std::size_t w0 = i;
+                // '$' TERMINATES A WORD. Without it a reference glued to preceding text is swallowed
+                // whole and never reaches the expansion branch below: `#eval{ 2*$R }` scanned `2*$R` as
+                // one word, so `$R` was never substituted and the evaluator died on the literal '$'.
+                // A reference with a space in front (`* ${/endTime}`) expanded fine, which is why only
+                // the glued spelling failed. OF's lexer ends the token at '$' because it starts one.
                 while (i < text.size() && !std::isspace((unsigned char)text[i])
-                       && text[i] != '{' && text[i] != '}' && text[i] != ';') { out += text[i]; ++i; }
+                       && text[i] != '{' && text[i] != '}' && text[i] != ';'
+                       && text[i] != '$') { out += text[i]; ++i; }
                 lastWord = text.substr(w0, i - w0);
                 continue;
             }

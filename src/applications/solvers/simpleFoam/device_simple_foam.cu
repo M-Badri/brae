@@ -3883,6 +3883,18 @@ void amgFineCoeffKernel(
         for (const auto& rc : ctl_.outerResidualControl)
         {
             const scalar r = residualOf(rc.field);
+            // A NON-FINITE residual must not silently read as "not converged". Every comparison below
+            // is false for NaN, so the field never satisfies its criterion and the outer loop quietly
+            // runs every corrector -- the solve has already produced garbage and residualControl is
+            // simply disabled, without a word. Measured on an all-Neumann pressure system with no
+            // reference cell: p's final residual came back NaN and the loop ran all five correctors
+            // while reporting nothing.
+            if (!std::isfinite(r))
+                throw std::runtime_error(
+                    "brae: PIMPLE/residualControl on field '" + rc.field + "' read a non-finite "
+                    "residual (" + std::to_string((double)r) + "). The solve produced a non-finite "
+                    "value; continuing would run every outer corrector with the control silently "
+                    "disabled. Check the pressure reference (pRefCell/pRefValue) on a closed domain.");
             const auto it = outerInitialResidual_.find(rc.field);
             const scalar ini = (it == outerInitialResidual_.end() ? scalar(0) : it->second) + scalar(1e-300);
             const bool abs_ = (rc.absTol > 0) && (r < rc.absTol);
@@ -3891,6 +3903,16 @@ void amgFineCoeffKernel(
             checked = true;
         }
         return checked && achieved;
+    }
+
+
+    DeviceSimpleSolver::~DeviceSimpleSolver()
+    {
+        // Every buffer this object owns goes back to the device pool here, and the pool reissues a
+        // freed block to the next same-size request -- so the next solver can receive these very
+        // addresses. Captured CUDA graphs key on pointers and would see nothing change; the generation
+        // is what tells them. See deviceGraphGeneration() in reductions.cu for the measurement.
+        bumpDeviceGraphGeneration();
     }
 
 
