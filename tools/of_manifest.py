@@ -1504,6 +1504,124 @@ COMPONENTS = {
     # statement about anything else. OpenFOAM's whole rhoSimpleFoam driver is 446 lines across 7 files, so
     # the systematic version is small; the closure BELOW it (thermo, the compressible turbulence set) is
     # where the real surface is, and that is exactly what case-by-case porting leaves unmeasured.
+    # interFoam: NOTHING IS PORTED YET. Every entry below is the SCOPE, read from OpenFOAM v2412's own
+    # source, not a claim about brae. It exists so the work can be argued about before any code is
+    # written -- which is the whole point of emitting the checklist first (see the header).
+    #
+    # What makes interFoam different from the three solvers already ported: it is a PIMPLE solver, and
+    # brae_pimpleFoam already runs that loop. The new work is not the time stepping -- it is the VoF
+    # half: a bounded explicit alpha solve (MULES) that is not a matrix assembly at all, interface
+    # curvature, and a pressure equation in p_rgh rather than p.
+    "interFoam": [
+        dict(name="interFoam_main", of_symbol="main",
+             of_file="applications/solvers/multiphase/interFoam/interFoam.C",
+             classification="HOST_ONLY", status="REIMPLEMENT",
+             brae_reference="src/applications/solvers/interFoam/interFoam_cpp.cu",
+             brae_target="src/applications/solvers/interFoam/interFoam.cu",
+             validation="tests/interfoam_tutorials_vs_openfoam.sh -- damBreak first (the canonical case), "
+                        "then capillaryRise (surface tension IS the answer there, so a missing sigma cannot "
+                        "hide), then damBreakWithObstacle in 3D.",
+             note="The time loop is PIMPLE and brae_pimpleFoam already runs it. Order per interFoam.C:151-168: "
+                  "alphaControls, alphaEqnSubCycle, mixture.correct(), UEqn, then the pressure corrector "
+                  "loop, then turbulence. adjustTimeStep/maxCo is REFUSED by brae_pimpleFoam today and "
+                  "interFoam needs it, so that lands here or before."),
+        dict(name="interFoam_alphaEqn", of_symbol="alphaEqn",
+             of_file="applications/solvers/multiphase/VoF/alphaEqn.H",
+             classification="SHARED_NUMERICAL", status="REIMPLEMENT",
+             brae_reference="src/applications/solvers/interFoam/alphaEqn_cpp.cu",
+             brae_target="src/applications/solvers/interFoam/alphaEqn.cu",
+             validation="Boundedness is an ASSERTION, not a tolerance: 0 <= alpha <= 1 exactly, every cell, "
+                        "every sub-cycle. A VoF gate that only checks agreement can pass while the field "
+                        "goes unbounded and is then clipped.",
+             note="cAlpha interface compression enters as div(phirb,alpha) with phir = cAlpha*|phi/magSf|. "
+                  "Only Euler and CrankNicolson ddt are accepted (alphaEqn.H:44-50 FatalErrors otherwise), "
+                  "and CrankNicolson is refused when sub-cycling."),
+        dict(name="interFoam_MULES", of_symbol="MULES::limiter",
+             of_file="src/finiteVolume/fvMatrices/solvers/MULES/MULES.C",
+             classification="SHARED_NUMERICAL", status="REIMPLEMENT",
+             brae_reference="src/finiteVolume/fvMatrices/solvers/MULES/mules_cpp.cu",
+             brae_target="src/finiteVolume/fvMatrices/solvers/MULES/device_mules.cu",
+             validation="Against OpenFOAM's own limiter field, face by face. The oracle needs an instrumented "
+                        "MULES (see the of-instrument skill) because the limiter is never written by a stock run.",
+             note="THE LARGEST SINGLE PIECE, and the least brae-like. MULES is an EXPLICIT, ITERATIVE, "
+                  "bound-preserving flux limiter -- not a matrix assembly -- so almost none of the fvm:: "
+                  "machinery the other solvers share applies to it. Budget it as its own stage."),
+        dict(name="interFoam_CMULES", of_symbol="MULES::correct",
+             of_file="src/finiteVolume/fvMatrices/solvers/MULES/CMULESTemplates.C",
+             classification="SHARED_NUMERICAL", status="REIMPLEMENT",
+             brae_reference="src/finiteVolume/fvMatrices/solvers/MULES/mules_cpp.cu",
+             brae_target="src/finiteVolume/fvMatrices/solvers/MULES/device_mules.cu",
+             validation="Shares the MULES gate; the semi-implicit path is a separate arm of it.",
+             note="The semi-implicit variant, used when MULESCorr is set. Separate from the explicit limiter "
+                  "above and selected per case."),
+        dict(name="interFoam_interfaceProperties", of_symbol="interfaceProperties",
+             of_file="src/transportModels/interfaceProperties/interfaceProperties.C",
+             classification="MODEL", status="REIMPLEMENT",
+             brae_reference="src/transportModels/interfaceProperties/interface_properties_cpp.cu",
+             brae_target="src/transportModels/interfaceProperties/device_interface_properties.cu",
+             validation="Curvature K_ against OpenFOAM's own, which a stock run never writes -- so this needs "
+                        "an instrumented interfaceProperties. Curvature is where a VoF port diverges invisibly.",
+             note="K_ = -div(nHatf) where nHatf = (gradAlphaf/(|gradAlphaf| + deltaN)) & Sf "
+                  "(interfaceProperties.C:141-153), plus alphaContactAngle correction on wall patches. "
+                  "surfaceTensionForce() = sigma*K_*snGrad(alpha1)."),
+        dict(name="interFoam_twoPhaseMixture", of_symbol="twoPhaseMixture",
+             of_file="src/transportModels/twoPhaseMixture/twoPhaseMixture/twoPhaseMixture.C",
+             classification="MODEL", status="REIMPLEMENT",
+             brae_reference="src/transportModels/twoPhaseMixture/two_phase_mixture_cpp.cu",
+             brae_target="src/transportModels/twoPhaseMixture/device_two_phase_mixture.cu",
+             validation="rho and mu as alpha-weighted blends, against OpenFOAM's own fields at iteration 1.",
+             note="Field plumbing rather than new numerics: rho = alpha1*rho1 + (1-alpha1)*rho2, same for mu."),
+        dict(name="interFoam_immiscibleMixture", of_symbol="immiscibleIncompressibleTwoPhaseMixture",
+             of_file="src/transportModels/immiscibleIncompressibleTwoPhaseMixture/immiscibleIncompressibleTwoPhaseMixture.C",
+             classification="MODEL", status="REIMPLEMENT",
+             brae_reference="src/transportModels/twoPhaseMixture/two_phase_mixture_cpp.cu",
+             brae_target="src/transportModels/twoPhaseMixture/device_two_phase_mixture.cu",
+             validation="Shares the twoPhaseMixture gate.",
+             note="Joins twoPhaseMixture and interfaceProperties into the one object interFoam.C holds."),
+        dict(name="interFoam_UEqn", of_symbol="UEqn",
+             of_file="applications/solvers/multiphase/interFoam/UEqn.H",
+             classification="SHARED_NUMERICAL", status="REIMPLEMENT",
+             brae_reference="src/applications/solvers/interFoam/interUEqn_cpp.cu",
+             brae_target="src/applications/solvers/interFoam/interUEqn.cu",
+             validation="Against OpenFOAM's own assembled matrix, as the rhoSimpleFoam momentum gate is.",
+             note="fvm::ddt(rho,U) + fvm::div(rhoPhi,U) + MRF.DDt(rho,U) + turbulence->divDevRhoReff(rho,U), "
+                  "with the momentum predictor's source reconstructed from surfaceTensionForce() - "
+                  "ghf*snGrad(rho) - snGrad(p_rgh). divDevRhoReff is the COMPRESSIBLE overload brae already has."),
+        dict(name="interFoam_pEqn", of_symbol="pEqn",
+             of_file="applications/solvers/multiphase/interFoam/pEqn.H",
+             classification="SHARED_NUMERICAL", status="REIMPLEMENT",
+             brae_reference="src/applications/solvers/interFoam/interPEqn_cpp.cu",
+             brae_target="src/applications/solvers/interFoam/interPEqn.cu",
+             validation="Against OpenFOAM's own p_rgh matrix and the reconstructed flux.",
+             note="A DIFFERENT PRESSURE EQUATION from anything ported: laplacian(rAUf, p_rgh) == div(phiHbyA), "
+                  "with phig = (surfaceTensionForce() - ghf*snGrad(rho))*rAUf*magSf added to phiHbyA first. "
+                  "p_rgh, not p. constrainHbyA/adjustPhi/constrainPressure are already ported and reused."),
+        dict(name="interFoam_vanLeer", of_symbol="vanLeer",
+             of_file="src/finiteVolume/interpolation/surfaceInterpolation/limitedSchemes/vanLeer/vanLeer.C",
+             classification="SHARED_NUMERICAL", status="REIMPLEMENT",
+             brae_reference="src/finiteVolume/interpolation/surfaceInterpolation/limitedSchemes/limitedSchemes_cpp.cuh",
+             brae_target="src/cuda/device_fvm.cu",
+             validation="Against OpenFOAM's own face weights, as the other limited schemes are.",
+             note="EVERY interFoam tutorial uses `div(phi,alpha) Gauss vanLeer`. brae has limitedLinear/V, "
+                  "vanAlbada, LUST, linearUpwind/V -- not vanLeer. Small, and blocking."),
+        dict(name="interFoam_alphaCourantNo", of_symbol="alphaCourantNo",
+             of_file="applications/solvers/multiphase/VoF/alphaCourantNo.H",
+             classification="CONFIGURATION", status="REIMPLEMENT",
+             brae_reference="src/applications/solvers/interFoam/interFoam_cpp.cu",
+             brae_target="src/applications/solvers/interFoam/interFoam.cu",
+             validation="Part of the end-to-end tutorial gate; the interface Courant number sets the step.",
+             note="maxAlphaCo drives the adaptive time step alongside maxCo. Needs adjustTimeStep, which "
+                  "brae_pimpleFoam refuses today."),
+        dict(name="interFoam_createFields", of_symbol="createFields",
+             of_file="applications/solvers/multiphase/interFoam/createFields.H",
+             classification="CONFIGURATION", status="REIMPLEMENT",
+             brae_reference="src/applications/solvers/interFoam/interCreateFields_cpp.cu",
+             brae_target="src/applications/solvers/interFoam/interCreateFields.cu",
+             validation="Field-by-field against OpenFOAM's own written state, as rhoCreateFields is.",
+             note="alpha1, p_rgh, gh/ghf from the gravity field, rhoPhi. g and hRef come from "
+                  "constant/g and constant/hRef, neither of which brae reads today."),
+    ],
+
     "rhoSimpleFoam": [
         dict(name="rhoSimpleFoam_main", of_symbol="main",
              of_file="applications/solvers/compressible/rhoSimpleFoam/rhoSimpleFoam.C",

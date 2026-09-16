@@ -189,6 +189,8 @@ tools/*/Make/linux*/
 
 .claude/*
 manifest/*
+# the interFoam manifest: the of-port checklist, emitted BEFORE any code is written
+!manifest/interFoam.yaml
 CLAUDE.md
 src/applications/solvers/rhoSimpleFoam/PORT.md
 src/applications/solvers/rhoSimpleFoam/REFUSALS.md
