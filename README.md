@@ -40,8 +40,8 @@ brae plateaus at **9.2 M cell-iterations/s**; OpenFOAM's curve *turns down* past
 
 Below ~10⁵ cells a GH200 is not the right tool. The advantage is a scaling one and arrives around a million cells.
 
-On an **H100**, simpleFoam: **26–30×** over OpenFOAM's own GPU offloads (AMGX, PETSc), **3.9×** over
-[SPUMA](https://gitlab-hpc.cineca.it/exafoam/spuma), **2.5×** over a 24-core CPU node.
+simpleFoam on an H100 reaches **26–30×** over OpenFOAM's AMGX and PETSc GPU offloads:
+[benchmarks →](docs/performance.md)
 
 ---
 
@@ -66,15 +66,12 @@ differences compound: squareBend reads ~8e-03 on p at iteration 100. Two nearby 
 
 ## 🖼 motorBike, 2.9M cells, k-omega SST
 
-Agrees to ~1.6% on drag with OpenFOAM, its AMGX and PETSc offloads, and SPUMA.
-
 | brae (Blackwell GPU) | OpenFOAM (Grace CPU) |
 |:---:|:---:|
 | ![motorBike surface pressure, brae on a Blackwell GPU](bench/results/simpleFoam/motorbike_p_brae.png) | ![motorBike surface pressure, OpenFOAM on Grace CPU cores](bench/results/simpleFoam/motorbike_p_of.png) |
-| **OpenFOAM + AMGX (GPU)** | **OpenFOAM + PETSc (GPU)** |
-| ![motorBike surface pressure, OpenFOAM with the AMGX GPU solver](bench/results/simpleFoam/motorbike_p_amgx.png) | ![motorBike surface pressure, OpenFOAM with the PETSc GPU solver](bench/results/simpleFoam/motorbike_p_petsc.png) |
 
-[Full five-way comparison →](bench/results/simpleFoam/motorbike_comparison.md)
+Surface pressure, same colour scale. Drag agrees to ~1.6% — with OpenFOAM's AMGX and PETSc GPU offloads and the
+SPUMA port too: [full five-way comparison →](bench/results/simpleFoam/motorbike_comparison.md)
 
 ---
 
