@@ -2,14 +2,14 @@
 
 ## The one idea: residency
 
-A CFD solver is **bandwidth-bound**, its speed is set by how fast it moves the matrix and fields through memory,
-not by raw compute. Brae's advantage is that it moves them as little as possible: the entire SIMPLE loop (assembly,
-momentum, turbulence, and the pressure multigrid solve) runs on the GPU, so nothing crosses the CPU↔GPU boundary
-between iterations.
+Most GPU approaches offload only the linear solve. The matrix is rebuilt on the CPU and copied to the GPU every
+iteration, so assembly, momentum and turbulence stay on one CPU core.
 
-"OpenFOAM on GPU" via a solver plug-in (PETSc, AMGX) offloads only the *linear solve*: it rebuilds the matrix on the
-CPU and copies it to the GPU **every iteration**, while the rest runs on one CPU core. That migration + the serial
-CPU remainder is why offload is ~5× slower than brae on the same GPU (below).
+| | where the work runs |
+|---|---|
+| OpenFOAM + AMGX / PETSc | assembly on CPU, linear solve on GPU, **matrix copied every iteration** |
+| SPUMA | GPU fork on unified memory — full residency, no per-iteration copy |
+| **brae** | **mesh, fields and every solve stay on the device from first iteration to last** |
 
 ## The fast path (on by default)
 
@@ -31,11 +31,11 @@ Other tuning knobs (advanced; sensible defaults):
 
 ## Benchmarks
 
-Total wall time for **100 SIMPLE iterations**, scaled-pitzDaily, on a single **NVIDIA GB10** (20 Grace CPU cores +
-one Blackwell GPU, unified LPDDR5x, **no HBM**). The one-time prep is done once and excluded on all sides: for
-OpenFOAM that is `decomposePar`; for brae it is `brae -partition -case <case>`, which builds and caches the mesh +
-AMG hierarchy (`constant/polyMesh/.brae_meshcache` + `.brae_amgcache`) so the timed run reloads them warm. See
-[Get started](../README.md#-get-started) for the workflow.
+| | |
+|---|---|
+| **measured** | total wall for 100 SIMPLE iterations, scaled-pitzDaily |
+| **hardware** | one NVIDIA GB10 — 20 Grace cores + one Blackwell GPU, unified LPDDR5x, **no HBM** |
+| **excluded, both sides** | one-time prep: `decomposePar` for OpenFOAM, `brae -partition` for brae (caches mesh + AMG, see [Run it](../README.md#-run-it)) |
 
 | cells | **brae** (Blackwell GPU) | OpenFOAM (20 Grace cores) | OpenFOAM+AMGX (same GPU) | OpenFOAM+PETSc-GPU (same GPU) | SPUMA (same GPU) |
 |---|---:|---:|---:|---:|---:|
@@ -60,25 +60,47 @@ of OpenFOAM on unified memory), the closest full-residency peer to brae. ¹ SPUM
 - **Parity-to-ahead of a 20-core Grace CPU node**, and the lead grows with mesh size (0.74× at 990k → 1.13× at
   35.6M). Small meshes under-utilize the GPU; large meshes saturate it.
 
-## Why GB10 is a conservative baseline, and HBM is the ceiling
+## Why GB10 is a conservative baseline
 
-GB10 has **no HBM**, its Blackwell GPU shares the same ~273 GB/s unified memory as the 20 Grace CPU cores. For a
-bandwidth-bound solver that means the GPU *cannot* structurally out-run the CPU on this box, so parity itself is the
-structural ceiling here, and brae clearing it at scale is a strong result on the most bandwidth-constrained hardware
-a GPU port can run on.
+| | |
+|---|---|
+| GB10 has **no HBM** | its GPU shares the same ~273 GB/s unified memory as the 20 Grace cores |
+| so the GPU **cannot** structurally out-run the CPU there | for a bandwidth-bound solver, parity *is* the ceiling |
+| brae clears it at scale anyway | on the most bandwidth-constrained hardware a GPU port can run on |
+| on HBM the usable bandwidth is ~10× higher | H100 ~3.3 TB/s, GH200 ~4 TB/s — measured below |
 
-On a GPU with **HBM** (H100 ~3.3 TB/s, GH200 ~4 TB/s) the memory bandwidth the GPU can use, and the CPU can't, is
-~10× higher. We expect the *same* brae code to deliver an **order-of-magnitude speedup, roughly 8-12×** a CPU node
-there, and unlike unified-memory offload it pays no migration tax to get it.
+## GH200: the same code on HBM
+
+Same source, **rhoSimpleFoam**, 100 fixed SIMPLE iterations, solver wall only, one GH200 against all 64 Grace cores:
+
+| case | cells | brae | OpenFOAM 64c | ratio |
+|---|---:|---:|---:|---:|
+| aerofoilNACA0012 | 10,000,000 | 108.2 s | 916.7 s | **8.47×** |
+| aerofoilNACA0012 | 1,024,000 | 11.1 s | 44.5 s | 4.00× |
+| squareBendLiq | 896,000 | 6.8 s | 8.4 s | 1.24× |
+| squareBend | 112,000 | 1.6 s | 1.8 s | 1.14× |
+| squareBendLiq | 112,000 | 1.7 s | 1.6 s | 0.92× |
+
+![rhoSimpleFoam throughput against mesh size, one GH200 versus 64 Grace cores, log-log](../bench/results/rhoSimpleFoam/brae_benchmark_scaling.png)
+
+| | |
+|---|---|
+| **8.47×** at 10M cells | inside the 8-12× predicted above from the bandwidth ratio alone |
+| brae plateaus at **9.2 M cell-iterations/s** | from ~1M cells up |
+| **OpenFOAM turns down** past 1M (2.3 -> 1.1) | the widening gap is OpenFOAM losing throughput, not brae gaining it |
+| `0.92x` row kept on purpose | below ~10^5 cells a GH200 is not the right tool |
+| sm_121 and sm_90 print every digit identical | squareBend, 10 iterations |
+
+Per-case tables: [rhoSimpleFoam on a GH200](../bench/results/rhoSimpleFoam/rhoSimpleFoam_gh200.md).
 
 ## Accuracy is not traded for speed
 
-Every performance flag is validated to preserve the result. On a converged case (turbulent pitzDaily), the fast
-path and the reference path reach the identical iteration count and agree to **U 0.016% / p 0.11%**, an order of
-magnitude below the ~1% brae-vs-OpenFOAM agreement. FP32 in the preconditioner is bit-identical because the mixed
-precision never touches the outer double-precision solve.
+| | |
+|---|---|
+| fast path vs reference path | identical iteration count, **U 0.016% / p 0.11%** (turbulent pitzDaily) |
+| FP32 in the preconditioner | bit-identical — mixed precision never touches the outer double-precision solve |
+| brae run to run | **byte-identical** — deterministic reductions, gated by `rho_run_to_run_identity` |
+| brae vs OpenFOAM, operator level | **1e-10 to 1e-13** — the GPU sums in a different order |
+| brae vs OpenFOAM, 100 iterations | sub-1% — the above compounding through the nonlinear iteration |
 
-Brae is not bit-identical to OpenFOAM itself, and is not expected to be: parallelising the arithmetic across the GPU
-reorders the floating-point reductions (and loops over cells rather than faces), which reshuffles the truncation
-error at machine precision. That bounded difference is what shows up as the sub-1% field agreement. The full
-explanation is in [getting-started.md](getting-started.md#why-the-results-are-not-bit-identical).
+Why not bit-identical: [getting-started.md](getting-started.md#why-the-results-are-not-bit-identical).
