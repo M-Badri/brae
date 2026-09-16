@@ -30,13 +30,16 @@ brae plateaus at **9.2 M cell-iterations/s**; OpenFOAM's curve *turns down* past
 
 **One GH200 against all 64 Grace cores**, 100 SIMPLE iterations, solver wall only:
 
-| case | cells | brae | OpenFOAM 64c | ratio |
-|---|---:|---:|---:|---:|
-| aerofoilNACA0012 | 10,000,000 | 108.2 s | 916.7 s | **8.47×** |
-| aerofoilNACA0012 | 1,024,000 | 11.1 s | 44.5 s | 4.00× |
-| squareBendLiq | 896,000 | 6.8 s | 8.4 s | 1.24× |
-| squareBend | 112,000 | 1.6 s | 1.8 s | 1.14× |
-| squareBendLiq | 112,000 | 1.7 s | 1.6 s | **0.92×** |
+| case | cells | brae | OpenFOAM 64c | SPUMA | vs OF | vs SPUMA |
+|---|---:|---:|---:|---:|---:|---:|
+| aerofoilNACA0012 | 10,000,000 | 108.2 s | 916.7 s | — | **8.47×** | — |
+| aerofoilNACA0012 | 1,024,000 | 11.1 s | 44.5 s | 1495.2 s | 4.00× | **135×** |
+| squareBendLiq | 896,000 | 6.8 s | 8.4 s | 92.2 s | 1.24× | **13.6×** |
+| squareBend | 112,000 | 1.6 s | 1.8 s | — | 1.14× | — |
+| squareBendLiq | 112,000 | 1.7 s | 1.6 s | 22.0 s | **0.92×** | **12.9×** |
+
+SPUMA is the [CINECA / EU-exaFOAM OpenFOAM-GPU port](https://gitlab-hpc.cineca.it/exafoam/spuma), the closest
+full-residency peer. The two blanks are mesh sizes SPUMA was not run at, not failures.
 
 Below ~10⁵ cells a GH200 is not the right tool. The advantage is a scaling one and arrives around a million cells.
 

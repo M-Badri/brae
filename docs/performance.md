@@ -73,13 +73,16 @@ of OpenFOAM on unified memory), the closest full-residency peer to brae. ¹ SPUM
 
 Same source, **rhoSimpleFoam**, 100 fixed SIMPLE iterations, solver wall only, one GH200 against all 64 Grace cores:
 
-| case | cells | brae | OpenFOAM 64c | ratio |
-|---|---:|---:|---:|---:|
-| aerofoilNACA0012 | 10,000,000 | 108.2 s | 916.7 s | **8.47×** |
-| aerofoilNACA0012 | 1,024,000 | 11.1 s | 44.5 s | 4.00× |
-| squareBendLiq | 896,000 | 6.8 s | 8.4 s | 1.24× |
-| squareBend | 112,000 | 1.6 s | 1.8 s | 1.14× |
-| squareBendLiq | 112,000 | 1.7 s | 1.6 s | 0.92× |
+| case | cells | brae | OpenFOAM 64c | SPUMA | vs OF | vs SPUMA |
+|---|---:|---:|---:|---:|---:|---:|
+| aerofoilNACA0012 | 10,000,000 | 108.2 s | 916.7 s | — | **8.47×** | — |
+| aerofoilNACA0012 | 1,024,000 | 11.1 s | 44.5 s | 1495.2 s | 4.00× | **135×** |
+| squareBendLiq | 896,000 | 6.8 s | 8.4 s | 92.2 s | 1.24× | **13.6×** |
+| squareBend | 112,000 | 1.6 s | 1.8 s | — | 1.14× | — |
+| squareBendLiq | 112,000 | 1.7 s | 1.6 s | 22.0 s | 0.92× | **12.9×** |
+
+SPUMA is the [CINECA / EU-exaFOAM OpenFOAM-GPU port](https://gitlab-hpc.cineca.it/exafoam/spuma), the closest
+full-residency peer. Two rows are blank because SPUMA was not run at that mesh size, not because it failed.
 
 ![rhoSimpleFoam throughput against mesh size, one GH200 versus 64 Grace cores, log-log](../bench/results/rhoSimpleFoam/brae_benchmark_scaling.png)
 
@@ -90,6 +93,18 @@ Same source, **rhoSimpleFoam**, 100 fixed SIMPLE iterations, solver wall only, o
 | **OpenFOAM turns down** past 1M (2.3 -> 1.1) | the widening gap is OpenFOAM losing throughput, not brae gaining it |
 | `0.92x` row kept on purpose | below ~10^5 cells a GH200 is not the right tool |
 | sm_121 and sm_90 print every digit identical | squareBend, 10 iterations |
+
+### All six tutorials, five codes
+
+![Wall time for 100 SIMPLE iterations across the six rhoSimpleFoam tutorials: brae, brae warm, OpenFOAM on 64 cores, AMGX, PETSc and SPUMA, log scale](../bench/results/rhoSimpleFoam/brae_benchmark_arms.png)
+
+| | |
+|---|---|
+| brae and brae-warm | left of everything, at every size |
+| OpenFOAM 64c | the only CPU arm, and the only one close |
+| AMGX / PETSc | the offloads — clustered 400-1600 s, the per-iteration matrix rebuild |
+| SPUMA | full residency like brae, but 10-100x behind it here |
+| timing asymmetry | **brae's wall includes its start-up; OpenFOAM's excludes `decomposePar`** |
 
 Per-case tables: [rhoSimpleFoam on a GH200](../bench/results/rhoSimpleFoam/rhoSimpleFoam_gh200.md).
 
