@@ -185,7 +185,10 @@ brae --help
 - **Single GPU** — the whole mesh is resident on one device, which caps problem size at its memory.
 - **Non-orthogonal meshes, compressible** — rhoSimpleFoam's iteration-1 velocity sits 2.4e-04 to 3.1e-03 from
   OpenFOAM on a 16° mesh, against 1.9e-09 orthogonal. Not yet localised; the table above is orthogonal.
-- **Not bit-identical** to OpenFOAM, and not meant to be — the GPU reorders the floating-point sums.
+- **Bit-reproducible run to run, not bit-identical to OpenFOAM.** brae's reductions are deterministic
+  (atomic-free per-cell gather), and two runs of one binary write byte-identical fields — gated. Against
+  OpenFOAM the GPU sums in a different order, so agreement bottoms out at **1e-10 to 1e-13** rather than
+  at zero; that is the table above.
 
 ---
 
