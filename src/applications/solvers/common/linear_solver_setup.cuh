@@ -570,13 +570,18 @@ inline void readLinearSolverControls(
             // solved through one model call. Two different counts would run one field's setting under
             // the other's name, so they are refused rather than resolved by order.
             ctl.nSweepsKE = solverNSweeps("k", 1);
-            if ((ctl.gsK || ctl.gsEps) && solverNSweeps(secondName, 1) != ctl.nSweepsKE)
+            // BOTH must actually run the smoothSolver path, not either. gsIsSymmetric() and
+            // solverNSweeps() return their DEFAULTS for a field that names no smoother at all, so with
+            // `||` a pair like `k { smoothSolver; GaussSeidel; }` + `omega { PBiCGStab; }` compared k's
+            // real setting against omega's default and refused -- a case OpenFOAM runs without comment,
+            // because omega never takes the GS path and its nSweeps/smoother are not read.
+            if (ctl.gsK && ctl.gsEps && solverNSweeps(secondName, 1) != ctl.nSweepsKE)
                 throw std::runtime_error(
                     "system/fvSolution gives k and " + secondName + " different `nSweeps` on a "
                     "smoothSolver. OpenFOAM smooths nSweeps times between residual evaluations and "
                     "counts sweeps, so the two entries stop the solves in different places, and this "
                     "driver carries one count for the transported pair.");
-            if ((ctl.gsK || ctl.gsEps) && gsIsSymmetric(secondName) != ctl.gsKESym)
+            if (ctl.gsK && ctl.gsEps && gsIsSymmetric(secondName) != ctl.gsKESym)
                 throw std::runtime_error(
                     "system/fvSolution names a `GaussSeidel` smoother on one of k / " + secondName
                     + " and `symGaussSeidel` on the other. Those are different OpenFOAM smoothers "

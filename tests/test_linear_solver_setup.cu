@@ -350,6 +350,61 @@ int main()
         eqScalar("absent pFinal falls back to p relTol",    ctl.relTolPFinal, 0.02);
     }
 
+    // ---- the mixed-smoother refusal, both directions ----
+    // The guard is `gsK && gsEps`, not `||`: a field that names NO smoother reports the DEFAULT from
+    // gsIsSymmetric()/solverNSweeps(), so `||` compared a real setting against a default and refused a
+    // pair OpenFOAM runs (k on smoothSolver, omega on PBiCGStab). These two arms keep the narrowing
+    // honest -- the refusal must still fire when BOTH fields really take the smoothSolver path.
+    {
+        auto buildPair = [&](const std::string& tag, const char* kSm, const char* omSm) {
+            const std::string d = base + "/pair_" + tag;
+            std::filesystem::create_directories(d + "/system");
+            std::ofstream f(d + "/system/fvSolution");
+            f << "FoamFile { version 2.0; format ascii; class dictionary; object fvSolution; }\n"
+              << "solvers\n{\n"
+              << "    p     { solver GAMG; tolerance 1e-07; relTol 0.05; }\n"
+              << "    U     { solver PBiCGStab; tolerance 1e-09; relTol 0.02; }\n"
+              << "    k     { solver smoothSolver; smoother " << kSm  << "; tolerance 1e-11; relTol 0.03; }\n"
+              << "    omega { solver smoothSolver; smoother " << omSm << "; tolerance 1e-10; relTol 0.04; }\n"
+              << "}\nSIMPLE { consistent yes; }\n";
+            return d;
+        };
+        auto refuses = [&](const std::string& d) {
+            DeviceSimpleControls c; c.turbulent = true; c.sst = true;
+            try { readLinearSolverControls(readDict(d + "/system/fvSolution"), "omega", c, "SIMPLE"); }
+            catch (const std::exception&) { return true; }
+            return false;
+        };
+        // ARM: genuinely mixed -- both on smoothSolver, different GaussSeidel variants.
+        if (refuses(buildPair("mixed", "GaussSeidel", "symGaussSeidel")))
+            std::printf("  OK   a genuine mixed GaussSeidel/symGaussSeidel pair is still refused\n");
+        else { std::printf("  FAIL a mixed GaussSeidel/symGaussSeidel pair was accepted\n"); failures++; }
+
+        // CONTROL: the same two fields agreeing must NOT be refused.
+        if (!refuses(buildPair("same", "symGaussSeidel", "symGaussSeidel")))
+            std::printf("  OK   a matching pair is accepted (the refusal is not firing on everything)\n");
+        else { std::printf("  FAIL a matching symGaussSeidel pair was refused\n"); failures++; }
+
+        // CONTROL: the case that started this -- only k takes the GS path, omega is a Krylov solve.
+        {
+            const std::string d = base + "/pair_krylov";
+            std::filesystem::create_directories(d + "/system");
+            {
+                std::ofstream f(d + "/system/fvSolution");
+                f << "FoamFile { version 2.0; format ascii; class dictionary; object fvSolution; }\n"
+                  << "solvers\n{\n"
+                  << "    p     { solver GAMG; tolerance 1e-07; relTol 0.05; }\n"
+                  << "    U     { solver PBiCGStab; tolerance 1e-09; relTol 0.02; }\n"
+                  << "    k     { solver smoothSolver; smoother GaussSeidel; tolerance 1e-11; relTol 0.03; }\n"
+                  << "    omega { solver PBiCGStab; tolerance 1e-10; relTol 0.04; }\n"
+                  << "}\nSIMPLE { consistent yes; }\n";
+            }
+            if (!refuses(d))
+                std::printf("  OK   k on smoothSolver + omega on PBiCGStab is accepted, as OpenFOAM does\n");
+            else { std::printf("  FAIL refused a k/omega pair OpenFOAM runs (omega takes no GS path)\n"); failures++; }
+        }
+    }
+
     std::printf("linear_solver_setup: %d failures\n", failures);
     return failures == 0 ? 0 : 1;
 }

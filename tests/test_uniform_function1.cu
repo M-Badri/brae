@@ -8,8 +8,13 @@
 //     coldWall { type fixedValue; value uniform 350; type uniformFixedValue;
 //                uniformValue { type expression; expression "..."; } }
 //
-// hasValue is still true, so the expression silently became the constant 350. squareBendLiq's T walls are
+// hasValue is still true, so the Function1 silently became the constant 350. squareBendLiq's T walls are
 // exactly this shape. A wrong wall temperature converges perfectly happily.
+//
+// `expression` IS NOW PORTED (src/finiteVolume/expressions/PatchFunction1/, gated by `patch_expr` and
+// `rho_patch_expression_vs_openfoam` against real OpenFOAM), so it must be EVALUATED here, not refused.
+// The refusal arm moved to `table`, which brae still cannot evaluate -- the contract under test is
+// unchanged: a Function1 brae cannot evaluate must never degrade to a stale `value`.
 //
 // Parse level on purpose: the claim is about what the READER records and what construction does with it,
 // and that is deterministic -- no solve, no tolerance, no GPU.
@@ -65,14 +70,38 @@ int main()
             "    wall { type fixedValue; value uniform 350; type uniformFixedValue;\n"
             "           uniformValue { type expression; expression \"300 + 50\"; } }"));
         const PatchFieldData<scalar>& b = fd.boundary.at(0);
-        if (b.unsupportedFunction1 == "expression")
+        // PORTED, so it must be TAKEN, not marked: hasPatchExpr carries the parsed expression and the
+        // value is recomputed per face at every updateCoeffs. A marker here would mean the reader had
+        // fallen back on the stale 350.
+        if (b.hasPatchExpr && b.unsupportedFunction1.empty())
         {
-            std::printf("  OK   expression uniformValue is marked (named '%s'), not silently dropped\n",
+            std::printf("  OK   expression uniformValue is evaluated, not degraded to the stale value\n");
+        }
+        else
+        {
+            std::printf("  FAIL expression uniformValue not taken (hasPatchExpr=%d marker='%s'); "
+                        "the stale value %g would be used\n",
+                        (int)b.hasPatchExpr, b.unsupportedFunction1.c_str(), (double)b.uniformValue);
+            failures++;
+        }
+    }
+
+    // 2b. THE REFUSAL ARM, on a Function1 brae genuinely cannot evaluate. Same shape as above -- an
+    // overriding uniformFixedValue over a stale `value uniform 350` -- so the degradation this file
+    // exists to catch is still exercised, just by `table` rather than by `expression`.
+    {
+        const FieldData<scalar> fd = readField<scalar>(writeField(base + "/tbl",
+            "    wall { type fixedValue; value uniform 350; type uniformFixedValue;\n"
+            "           uniformValue table ((0 300) (1 400)); }"));
+        const PatchFieldData<scalar>& b = fd.boundary.at(0);
+        if (b.unsupportedFunction1 == "table")
+        {
+            std::printf("  OK   table uniformValue is marked (named '%s'), not silently dropped\n",
                         b.unsupportedFunction1.c_str());
         }
         else
         {
-            std::printf("  FAIL expression uniformValue left marker '%s'; the stale value %g would be used\n",
+            std::printf("  FAIL table uniformValue left marker '%s'; the stale value %g would be used\n",
                         b.unsupportedFunction1.c_str(), (double)b.uniformValue);
             failures++;
         }
