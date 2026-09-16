@@ -86,17 +86,36 @@ Type `brae`. It reads the `application` entry in your `controlDict` and runs the
 |---|---|
 | [`simpleFoam`](docs/solvers/simplefoam.md) | steady incompressible |
 | [`pimpleFoam`](docs/solvers/pimplefoam.md) | transient incompressible — URANS / DES / LES |
-| `rhoSimpleFoam` | steady compressible, subsonic and transonic |
+| [`rhoSimpleFoam`](docs/solvers/rhosimplefoam.md) | steady compressible, subsonic and transonic |
+
+<details>
+<summary><b>Full support matrix</b> — turbulence, thermo, schemes, 25+ boundary conditions, fvOptions</summary>
+
+<br>
 
 | | supported |
 |---|---|
 | **turbulence** | kEpsilon · realizableKE · kOmegaSST · kOmegaSSTLM · SpalartAllmaras · Smagorinsky · WALE · SA-DDES/IDDES · kOmegaSST-DDES/IDDES · laminar · generalizedNewtonian |
-| **thermo** | hePsiThermo · heRhoThermo · perfectGas · hConst · sutherland · const · liquid (NSRDS) |
+| **thermo** | hePsiThermo · heRhoThermo · perfectGas · hConst · sutherland · const · liquid (NSRDS correlations, OpenFOAM's own `he→T` inversion) |
 | **convection** | upwind · linearUpwind · linearUpwindV · LUST · linear · limitedLinear · limitedLinearV · vanAlbada |
-| **coupling** | SIMPLE · SIMPLEC · PIMPLE · transonic |
+| **pressure–velocity** | SIMPLE · SIMPLEC (`consistent yes`) · PIMPLE · transonic |
 | **time** | steadyState · Euler · backward · CrankNicolson |
-| **boundaries** | fixedValue · zeroGradient · noSlip · slip · symmetry · symmetryPlane · wedge · empty · cyclic · cyclicAMI · inletOutlet · outletInlet · totalPressure · fixedFluxPressure · pressureInletOutletVelocity · flowRateInletVelocity · freestream · surfaceNormalFixedValue · uniformFixedValue · codedFixedValue · turbulent inlets · nutk/epsilon/omega/kqR wall functions |
 | **fvOptions** | explicitPorositySource · limitTemperature · fixedTemperatureConstraint · scalarFixedValueConstraint · MRF |
+
+**Boundary conditions**
+
+| | |
+|---|---|
+| basic | fixedValue · zeroGradient · noSlip · calculated |
+| geometric | slip · symmetry · symmetryPlane · wedge · empty |
+| coupled | cyclic · cyclicAMI · processor |
+| inlet / outlet | inletOutlet · outletInlet · flowRateInletVelocity · surfaceNormalFixedValue · freestream · freestreamVelocity |
+| pressure | totalPressure · fixedFluxPressure · pressureInletOutletVelocity |
+| time-varying | uniformFixedValue · codedFixedValue · fixedMean |
+| turbulence | nutkWallFunction · epsilonWallFunction · omegaWallFunction · kqRWallFunction · turbulentIntensityKineticEnergyInlet · turbulentMixingLengthDissipationRateInlet |
+| thermal | externalWallHeatFluxTemperature · limitTemperature |
+
+</details>
 
 Coming soon: `interFoam` (two-phase VoF).
 
